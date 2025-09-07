@@ -1,0 +1,90 @@
+#!/bin/bash
+set -euo pipefail
+
+# jj wrapper - handles subcommand expansion and custom aliases
+# Usage: jj [subcommand] [sub-subcommand] [args...]
+#
+# This wrapper:
+# 1. Expands short subcommands (g -> git, b -> bookmark, etc.)
+# 2. Checks for custom aliases like git-force-push
+# 3. Falls through to the real jj command
+
+# Find the real jj command (skip aliases and this wrapper)
+find_real_jj() {
+    local wrapper_realpath
+    wrapper_realpath=$(realpath "$0")
+    
+    # Use type -a to find all jj definitions, then filter for actual files
+    while IFS= read -r line; do
+        # Look for lines like "jj is /path/to/jj"
+        if [[ "$line" =~ ^jj\ is\ (/.*) ]]; then
+            local candidate="${BASH_REMATCH[1]}"
+            # Make sure it's not this wrapper
+            if [[ -x "$candidate" ]] && [[ "$(realpath "$candidate")" != "$wrapper_realpath" ]]; then
+                echo "$candidate"
+                return 0
+            fi
+        fi
+    done < <(type -a jj 2>/dev/null)
+    
+    echo "Error: Could not find jj command" >&2
+    exit 1
+}
+
+JJ_BIN=$(find_real_jj)
+
+# Subcommand expansion mappings
+expand_subcommand() {
+    case "$1" in
+        g) echo "git" ;;
+        b) echo "bookmark" ;;
+        ci) echo "commit" ;;
+        desc) echo "describe" ;;
+        st) echo "status" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# Check if an alias exists for the given command combination
+check_alias() {
+    local cmd="$1"
+    # Check if jj has this as an alias
+    if "$JJ_BIN" config list aliases."$cmd" 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    return 1
+}
+
+# Main logic
+main() {
+    # If no arguments, just pass through
+    if [[ $# -eq 0 ]]; then
+        exec "$JJ_BIN" "$@"
+    fi
+
+    # Get the first argument (subcommand)
+    local subcommand="$1"
+    shift
+
+    # Expand the subcommand if it's a shortcut
+    subcommand=$(expand_subcommand "$subcommand")
+
+    # If there's a sub-subcommand, check for compound aliases
+    if [[ $# -gt 0 ]] && [[ ! "$1" =~ ^- ]]; then
+        local sub_subcommand="$1"
+        local compound_alias="${subcommand}-${sub_subcommand}"
+        
+        # Check if this compound alias exists
+        if check_alias "$compound_alias"; then
+            # Remove the sub-subcommand from args since it's part of the alias
+            shift
+            # Execute with the compound alias
+            exec "$JJ_BIN" "$compound_alias" "$@"
+        fi
+    fi
+
+    # No special handling needed, pass through with expanded subcommand
+    exec "$JJ_BIN" "$subcommand" "$@"
+}
+
+main "$@"

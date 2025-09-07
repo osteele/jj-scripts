@@ -1,0 +1,228 @@
+#!/bin/bash
+set -euo pipefail
+
+# Check for llm installation
+if ! command -v llm >/dev/null 2>&1; then
+    echo "Error: llm command not found. Install from https://llm.datasette.io/en/stable/setup.html" >&2
+    exit 1
+fi
+
+# Check for jj installation
+if ! command -v jj >/dev/null 2>&1; then
+    echo "Error: jj command not found. Install from https://github.com/martinvonz/jj" >&2
+    exit 1
+fi
+
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [options] [revision]
+
+Generate a conventional commit message for a Jujutsu revision using AI.
+If no revision is specified, uses the current working copy (@).
+
+Options:
+    -m, --model MODEL   Specify the LLM model to use (default: auto-select)
+                        Examples: gpt-4, claude-3-opus, mistral-7b, ...
+    -n, --dry-run       Show the message without applying it
+    -p, --prompt PROMPT Provide additional instructions for the message
+    -l, --list          List available models
+    --edit              Open editor after generating the message
+    --no-edit           Don't open editor (default)
+    --reset-author      Reset the author to the configured user
+    --author AUTHOR     Set a specific author for the revision
+    -h, --help          Show this help
+EOF
+    exit 1
+}
+
+# Default model selection
+select_default_model() {
+    local models
+    models=$(llm models)
+
+    # Check if we got any models
+    if [ -z "$models" ]; then
+        echo "Error: No LLM models found. Please install at least one model." >&2
+        exit 1
+    fi
+
+    # Define preferred models in order of preference
+    local preferred_models=(
+        "ai-commit-message"
+        "claude-3.5-sonnet"
+        "gemini-2.0-flash-latest"
+        "o3-mini"
+        "deepseek-coder"
+        "gpt-4o-mini"
+    )
+
+    # Try each preferred model in order
+    for model in "${preferred_models[@]}"; do
+        if echo "$models" | grep -q "$model"; then
+            echo "$model"
+            return 0
+        fi
+    done
+
+    # If no preferred model is found, use the first available model
+    echo "$models" | head -n 1
+}
+
+# Default values
+model=$(select_default_model)
+dry_run=false
+revision="@"
+custom_prompt=""
+
+# Array for jj describe arguments
+declare -a jj_describe_args=()
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m|--model)
+            model="$2"
+            shift 2
+            ;;
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        -l|--list)
+            echo "Available models:"
+            llm models
+            exit 0
+            ;;
+        -p|--prompt)
+            custom_prompt="$2"
+            shift 2
+            ;;
+        --edit)
+            jj_describe_args+=("--edit")
+            shift
+            ;;
+        --no-edit)
+            jj_describe_args+=("--no-edit")
+            shift
+            ;;
+        --reset-author)
+            jj_describe_args+=("--reset-author")
+            shift
+            ;;
+        --author)
+            jj_describe_args+=("--author" "$2")
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            if [[ $1 == -* ]]; then
+                echo "Error: Unknown option: $1" >&2
+                usage
+            else
+                revision="$1"
+                shift
+            fi
+            ;;
+    esac
+done
+
+# Check if we're in a jj repository
+if ! jj root >/dev/null 2>&1; then
+    echo "Error: Not in a Jujutsu repository" >&2
+    exit 1
+fi
+
+# Validate the revision exists
+if ! jj log --no-pager --no-graph -r "$revision" -T 'change_id' >/dev/null 2>&1; then
+    echo "Error: Invalid revision: $revision" >&2
+    exit 1
+fi
+
+# Get the current description
+current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+
+# Show revision info (but not the full diff)
+echo -e "\n== Revision $revision =="
+jj log --no-pager --no-graph -r "$revision"
+
+# Generate new commit message with progress indicator
+# Check if the model is an alias and resolve it
+model_display="$model"
+if [[ "$model" == "ai-commit-message" ]]; then
+    resolved_model=$(llm aliases list 2>/dev/null | grep "^ai-commit-message" | sed 's/^ai-commit-message[[:space:]]*:[[:space:]]*//')
+    if [[ -n "$resolved_model" ]]; then
+        model_display="ai-commit-message: $resolved_model"
+    fi
+fi
+
+echo -e "\n== Generating Description (via ${model_display}) =="
+echo -n "Generating commit message... " >&2
+
+# Build the prompt
+if [[ -n "$custom_prompt" ]]; then
+    prompt_text="Analyze these changes and create a commit message according to the following instructions:
+
+Current description:
+\`\`\`
+$current_desc
+\`\`\`
+
+Changes:
+\`\`\`
+$(jj diff --no-pager -r "$revision" --git)
+\`\`\`
+
+Instructions:
+\`\`\`
+$custom_prompt
+\`\`\`
+
+Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
+Don't include any other text in the response, just the commit message."
+else
+    prompt_text="Analyze these changes and create a conventional commit message:
+
+\`\`\`
+$(jj diff --no-pager -r "$revision" --git)
+\`\`\`
+
+Current description (if any):
+\`\`\`
+$current_desc
+\`\`\`
+
+Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
+Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:).
+Don't include any other text in the response, just the commit message."
+fi
+
+commit_msg=$(llm \
+    --model "$model" \
+    "$prompt_text"
+)
+
+printf "\r\033[K" >&2  # Clear progress message
+
+# Strip markdown code fences if present
+if [[ "$commit_msg" =~ ^\`\`\`.* ]] && [[ "$commit_msg" =~ \`\`\`$ ]]; then
+    commit_msg=$(echo "$commit_msg" | sed -e '1s/^```.*//' -e '$s/```$//' | sed '/^$/d')
+fi
+
+# Display the message
+echo "$commit_msg"
+
+if [ "$dry_run" = true ]; then
+    echo -e "\n== Next Steps =="
+    echo "To apply this message, run: $(basename "$0") $revision"
+else
+    echo -e "\n== Applying new description ==" >&2
+    
+    # Apply the new description to the revision
+    if [ ${#jj_describe_args[@]} -gt 0 ]; then
+        jj describe -r "$revision" -m "$commit_msg" "${jj_describe_args[@]}" && echo "Description updated successfully!"
+    else
+        jj describe -r "$revision" -m "$commit_msg" && echo "Description updated successfully!"
+    fi
+fi
