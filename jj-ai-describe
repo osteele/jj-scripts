@@ -21,16 +21,31 @@ Generate a conventional commit message for a Jujutsu revision using AI.
 If no revision is specified, uses the current working copy (@).
 
 Options:
-    -m, --model MODEL   Specify the LLM model to use (default: auto-select)
-                        Examples: gpt-4, claude-3-opus, mistral-7b, ...
-    -n, --dry-run       Show the message without applying it
-    -p, --prompt PROMPT Provide additional instructions for the message
-    -l, --list          List available models
-    --edit              Open editor after generating the message
-    --no-edit           Don't open editor (default)
-    --reset-author      Reset the author to the configured user
-    --author AUTHOR     Set a specific author for the revision
-    -h, --help          Show this help
+    -m, --model MODEL       Specify the LLM model to use (default: auto-select)
+                            Examples: gpt-4, claude-3-opus, mistral-7b, ...
+    -n, --dry-run           Show the message without applying it
+    -p, --prompt PROMPT     Provide additional instructions for the message
+    -l, --list              List available models
+    
+    Diff options (passed to jj diff):
+    -f, --from REVSET       Starting revset for diff
+    -t, --to REVSET         Ending revset for diff  
+    -r, --revisions REVSET  Revisions to diff (alternative to --from/--to)
+    
+    Description options:
+    --edit                  Open editor after generating the message
+    --no-edit               Don't open editor (default)
+    --reset-author          Reset the author to the configured user
+    --author AUTHOR         Set a specific author for the revision
+    
+    -h, --help              Show this help
+
+Examples:
+    $(basename "$0")                    # Describe @ with its own changes
+    $(basename "$0") abc123              # Describe abc123 with its own changes
+    $(basename "$0") @ --from main       # Describe @ using diff from main
+    $(basename "$0") @ -r main..@         # Describe @ using revisions syntax
+    $(basename "$0") xyz -f @ -t xyz     # Describe xyz using diff from @ to xyz
 EOF
     exit 1
 }
@@ -74,13 +89,18 @@ dry_run=false
 revision="@"
 custom_prompt=""
 
-# Array for jj describe arguments
+# Arrays for jj arguments
 declare -a jj_describe_args=()
+declare -a jj_diff_args=()
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--model)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --model requires an argument" >&2
+                exit 1
+            fi
             model="$2"
             shift 2
             ;;
@@ -94,7 +114,35 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -p|--prompt)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --prompt requires an argument" >&2
+                exit 1
+            fi
             custom_prompt="$2"
+            shift 2
+            ;;
+        -f|--from)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --from requires an argument" >&2
+                exit 1
+            fi
+            jj_diff_args+=("--from" "$2")
+            shift 2
+            ;;
+        -t|--to)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --to requires an argument" >&2
+                exit 1
+            fi
+            jj_diff_args+=("--to" "$2")
+            shift 2
+            ;;
+        -r|--revisions)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --revisions requires an argument" >&2
+                exit 1
+            fi
+            jj_diff_args+=("--revisions" "$2")
             shift 2
             ;;
         --edit)
@@ -110,6 +158,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --author)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --author requires an argument" >&2
+                exit 1
+            fi
             jj_describe_args+=("--author" "$2")
             shift 2
             ;;
@@ -147,6 +199,11 @@ current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
 echo -e "\n== Revision $revision =="
 jj log --no-pager --no-graph -r "$revision"
 
+# If using diff args, show what we're diffing
+if [ ${#jj_diff_args[@]} -gt 0 ]; then
+    echo -e "\n== Using custom diff parameters =="
+fi
+
 # Generate new commit message with progress indicator
 # Check if the model is an alias and resolve it
 model_display="$model"
@@ -160,6 +217,15 @@ fi
 echo -e "\n== Generating Description (via ${model_display}) =="
 echo -n "Generating commit message... " >&2
 
+# Get the diff using provided options or default to revision's changes
+if [ ${#jj_diff_args[@]} -gt 0 ]; then
+    # Use the custom diff arguments
+    diff_output=$(jj diff --no-pager "${jj_diff_args[@]}" --git)
+else
+    # Default: use the revision's own changes
+    diff_output=$(jj diff --no-pager -r "$revision" --git)
+fi
+
 # Build the prompt
 if [[ -n "$custom_prompt" ]]; then
     prompt_text="Analyze these changes and create a commit message according to the following instructions:
@@ -171,7 +237,7 @@ $current_desc
 
 Changes:
 \`\`\`
-$(jj diff --no-pager -r "$revision" --git)
+$diff_output
 \`\`\`
 
 Instructions:
@@ -185,7 +251,7 @@ else
     prompt_text="Analyze these changes and create a conventional commit message:
 
 \`\`\`
-$(jj diff --no-pager -r "$revision" --git)
+$diff_output
 \`\`\`
 
 Current description (if any):

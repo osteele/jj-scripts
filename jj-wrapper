@@ -1,13 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# jj wrapper - handles subcommand expansion and custom aliases
+# jj wrapper - handles subcommand expansion, custom aliases, and jj-* binaries
 # Usage: jj [subcommand] [sub-subcommand] [args...]
 #
 # This wrapper:
 # 1. Expands short subcommands (g -> git, b -> bookmark, etc.)
-# 2. Checks for custom aliases like git-force-push
-# 3. Falls through to the real jj command
+# 2. Checks for custom aliases like git-force-push in jj config
+# 3. Looks for jj-* binaries in PATH (e.g., jj ai-describe runs jj-ai-describe)
+# 4. Falls through to the real jj command
 
 # Find the real jj command (skip aliases and this wrapper)
 find_real_jj() {
@@ -55,6 +56,19 @@ check_alias() {
     return 1
 }
 
+# Check if a jj-* binary exists in PATH
+find_jj_binary() {
+    local cmd="$1"
+    local binary_name="jj-$cmd"
+    
+    # Check if the binary exists and is executable
+    if command -v "$binary_name" >/dev/null 2>&1; then
+        echo "$binary_name"
+        return 0
+    fi
+    return 1
+}
+
 # Main logic
 main() {
     # If no arguments, just pass through
@@ -69,18 +83,32 @@ main() {
     # Expand the subcommand if it's a shortcut
     subcommand=$(expand_subcommand "$subcommand")
 
-    # If there's a sub-subcommand, check for compound aliases
+    # If there's a sub-subcommand, check for compound handling
     if [[ $# -gt 0 ]] && [[ ! "$1" =~ ^- ]]; then
         local sub_subcommand="$1"
         local compound_alias="${subcommand}-${sub_subcommand}"
         
-        # Check if this compound alias exists
+        # First, check if this compound alias exists in jj config
         if check_alias "$compound_alias"; then
             # Remove the sub-subcommand from args since it's part of the alias
             shift
             # Execute with the compound alias
             exec "$JJ_BIN" "$compound_alias" "$@"
         fi
+        
+        # Second, check if there's a jj-* binary for the compound
+        if binary=$(find_jj_binary "$compound_alias"); then
+            # Remove the sub-subcommand from args since we'll call the binary
+            shift
+            # Execute the binary directly
+            exec "$binary" "$@"
+        fi
+    fi
+    
+    # Check if there's a jj-* binary for the single subcommand
+    if binary=$(find_jj_binary "$subcommand"); then
+        # Execute the binary directly
+        exec "$binary" "$@"
     fi
 
     # No special handling needed, pass through with expanded subcommand
