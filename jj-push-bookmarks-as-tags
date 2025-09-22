@@ -1,0 +1,126 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+    cat <<'USAGE'
+Usage: jj-push-bookmarks-as-tags [options] bookmark [bookmark ...]
+
+Export jj bookmarks as git tags and push them to the origin remote.
+This first runs jj-export-bookmarks-as-tags, then pushes the tags.
+
+Options:
+    -f, --force        Force push tags (overwrite existing remote tags)
+    -n, --dry-run      Show what would be done without executing
+    -h, --help         Show this help message
+USAGE
+    exit 1
+}
+
+# Ensure required commands exist
+for cmd in jj git jj-export-bookmarks-as-tags; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "Error: $cmd command not found" >&2
+        exit 1
+    fi
+done
+
+if ! jj root >/dev/null 2>&1; then
+    echo "Error: Not in a Jujutsu repository" >&2
+    exit 1
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Error: Not inside a git repository" >&2
+    exit 1
+fi
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+    echo "Error: No git remote named 'origin' found" >&2
+    exit 1
+fi
+
+dry_run=false
+force=false
+bookmarks=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        -f|--force)
+            force=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        --)
+            shift
+            while [[ $# -gt 0 ]]; do
+                bookmarks+=("$1")
+                shift
+            done
+            ;;
+        -*)
+            echo "Error: Unknown option $1" >&2
+            usage
+            ;;
+        *)
+            bookmarks+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ ${#bookmarks[@]} -eq 0 ]]; then
+    echo "Error: At least one bookmark name must be provided" >&2
+    usage
+fi
+
+# First, export bookmarks as tags locally
+export_args=()
+if [[ "$dry_run" == true ]]; then
+    export_args+=("--dry-run")
+fi
+export_args+=("${bookmarks[@]}")
+
+echo "Exporting bookmarks as tags..."
+jj-export-bookmarks-as-tags "${export_args[@]}"
+
+if [[ "$dry_run" == false ]]; then
+    echo ""
+fi
+
+# Now push the tags to origin
+had_push_failure=false
+failed_tags=()
+
+for bookmark in "${bookmarks[@]}"; do
+    push_args=(git push origin "refs/tags/$bookmark")
+    if [[ "$force" == true ]]; then
+        push_args+=("--force")
+    fi
+
+    if [[ "$dry_run" == true ]]; then
+        echo "Would run: ${push_args[*]}"
+    else
+        echo "Pushing tag '$bookmark' to origin..."
+        if ! "${push_args[@]}" 2>&1; then
+            had_push_failure=true
+            failed_tags+=("$bookmark")
+        fi
+    fi
+done
+
+# If any pushes failed and force wasn't used, provide helpful message
+if [[ "$had_push_failure" == true ]] && [[ "$force" == false ]]; then
+    echo ""
+    echo "Error: Failed to push some tags because they already exist on the remote."
+    echo "To overwrite existing remote tags, re-run with --force:"
+    echo ""
+    echo "    jj-push-bookmarks-as-tags --force ${failed_tags[*]}"
+    echo ""
+    exit 1
+fi

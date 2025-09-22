@@ -18,6 +18,62 @@ jj config set --user 'aliases.ai-commit' '["util", "exec", "--", "jj-ai-commit"]
 
 ## Jujutsu Tools
 
+### `jj-squash-safe`
+A smart squashing tool that finds the earliest ancestor where a commit can be safely squashed without creating merge conflicts. Unlike `jj squash`, this automatically determines the optimal target commit.
+
+```bash
+# Safe-squash current working copy into earliest conflict-free ancestor
+jj-squash-safe
+
+# Safe-squash a specific revision
+jj-squash-safe abc123
+
+# Preview what would happen without making changes
+jj-squash-safe --dry-run
+
+# Show detailed progress information
+jj-squash-safe --verbose
+
+# Combine options
+jj-squash-safe --dry-run --verbose @
+```
+
+The script walks up the ancestor chain from the specified commit, testing each ancestor to determine if squashing would be safe. It stops when it encounters:
+- Merge commits (multiple parents)
+- The root of the repository
+- Any ancestor where conflicts would occur
+
+### `jj-export-bookmarks-as-tags`
+Export Jujutsu bookmarks as git tags in the local repository. This command is analogous to `jj git export` but specifically for converting bookmarks to tags. Existing tags with the same name will be overwritten.
+
+```bash
+# Export a single bookmark as a tag
+jj-export-bookmarks-as-tags release
+
+# Export multiple bookmarks in one call
+jj-export-bookmarks-as-tags release staging demo
+
+# Preview what tags would be created/updated without executing
+jj-export-bookmarks-as-tags --dry-run release
+```
+
+### `jj-push-bookmarks-as-tags`
+Export Jujutsu bookmarks as git tags and push them to the `origin` remote. This command is analogous to `jj git push` - it first runs `jj-export-bookmarks-as-tags` to create/update local tags, then pushes them to the remote.
+
+```bash
+# Export and push a single bookmark as a tag
+jj-push-bookmarks-as-tags release
+
+# Export and push multiple bookmarks in one call
+jj-push-bookmarks-as-tags release staging demo
+
+# Force push tags (overwrite existing remote tags)
+jj-push-bookmarks-as-tags --force release
+
+# Preview what would be done without executing
+jj-push-bookmarks-as-tags --dry-run release
+```
+
 ### `jj-wrapper`
 A wrapper for the `jj` command that provides subcommand expansion and custom alias support. This wrapper enables shortcuts and handles compound aliases like `git-force-push`.
 
