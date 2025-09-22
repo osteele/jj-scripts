@@ -211,6 +211,8 @@ $custom_prompt
 \`\`\`
 
 Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
+Do not include a summary paragraph after any list of changes.
+Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
 Don't include any other text in the response, just the commit message."
 else
     prompt_text="Analyze these changes and create a conventional commit message:
@@ -220,6 +222,8 @@ $diff_content
 \`\`\`
 
 Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
+Do not include a summary paragraph after any list of changes.
+Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
 Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:).
 Don't include any other text in the response, just the commit message."
 fi
