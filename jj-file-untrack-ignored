@@ -1,0 +1,121 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [--dry-run]
+
+Untrack files reported by jj status that match .gitignore patterns.
+
+Options:
+    -n, --dry-run   Show which files would be untracked without changing anything
+    -h, --help      Show this help message
+EOF
+}
+
+error() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+dry_run=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if ! command -v jj >/dev/null 2>&1; then
+    error "jj command not found in PATH"
+fi
+
+if ! command -v git >/dev/null 2>&1; then
+    error "git command not found in PATH"
+fi
+
+repo_root=$(jj root 2>/dev/null) || error "Not inside a jj repository"
+
+if ! (cd "$repo_root" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
+    error "Git repository not found at $repo_root"
+fi
+
+# Collect paths that show up in jj status by diffing the working copy commit.
+changed_paths=()
+while IFS= read -r path; do
+    if [[ -n "$path" ]]; then
+        changed_paths+=("$path")
+    fi
+done < <(cd "$repo_root" && jj diff --name-only)
+
+if [[ ${#changed_paths[@]} -eq 0 ]]; then
+    echo "No working copy changes; nothing to untrack."
+    exit 0
+fi
+
+ignored_paths=()
+
+if [[ ${#changed_paths[@]} -gt 0 ]]; then
+    while IFS= read -r -d '' path; do
+        ignored_paths+=("$path")
+    done < <(
+        printf '%s\0' "${changed_paths[@]}" |
+        (
+            cd "$repo_root"
+            # --no-index ensures git considers tracked files that still exist in the repo.
+            git check-ignore --no-index -z --stdin || true
+        )
+    )
+fi
+
+unique_paths=()
+
+if [[ ${#ignored_paths[@]} -gt 1 ]]; then
+    unique_paths=()
+    for path in "${ignored_paths[@]}"; do
+        already_present=false
+        if [[ ${#unique_paths[@]} -gt 0 ]]; then
+            for existing in "${unique_paths[@]}"; do
+                if [[ "$path" == "$existing" ]]; then
+                    already_present=true
+                    break
+                fi
+            done
+        fi
+        if [[ "$already_present" == false ]]; then
+            unique_paths+=("$path")
+        fi
+    done
+    ignored_paths=("${unique_paths[@]}")
+fi
+
+if [[ ${#ignored_paths[@]} -eq 0 ]]; then
+    echo "No tracked files are ignored by .gitignore."
+    exit 0
+fi
+
+echo "Files matched by .gitignore:"
+for path in "${ignored_paths[@]}"; do
+    echo " - $path"
+done
+
+if [[ "$dry_run" == true ]]; then
+    echo "Dry run: not untracking any files."
+    exit 0
+fi
+
+(cd "$repo_root" && jj file untrack "${ignored_paths[@]}")
+
+echo "Untracked ${#ignored_paths[@]} file(s)."

@@ -103,6 +103,17 @@ jj st                  # Expands to: jj status
 jj git force-push      # Uses git-force-push alias if it exists
 ```
 
+### `jj-file-untrack-ignored`
+Automatically stops tracking working copy files that have become ignored by `.gitignore`. Useful after updating ignore rules so that generated artifacts disappear from `jj status` without manually untracking each file.
+
+```bash
+# Untrack all tracked files now ignored by .gitignore
+jj-file-untrack-ignored
+
+# Preview what would be untracked
+jj-file-untrack-ignored --dry-run
+```
+
 ## AI-Assisted Jujutsu Tools
 
 These AI-powered tools use the `llm` command-line tool to generate conventional commit messages. You can configure a custom model for all commit message generation by setting an alias:
