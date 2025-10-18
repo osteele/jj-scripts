@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Source shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jj-ai-lib.sh"
+
 # Check for llm installation
 if ! command -v llm >/dev/null 2>&1; then
     echo "Error: llm command not found. Install from https://llm.datasette.io/en/stable/setup.html" >&2
@@ -51,39 +55,6 @@ For example:
     llm aliases set ai-commit-message openrouter/google/gemini-2.5-flash-lite
 EOF
     exit 1
-}
-
-# Default model selection
-select_default_model() {
-    local models
-    models=$(llm models)
-
-    # Check if we got any models
-    if [ -z "$models" ]; then
-        echo "Error: No LLM models found. Please install at least one model." >&2
-        exit 1
-    fi
-
-    # Define preferred models in order of preference
-    local preferred_models=(
-        "ai-commit-message"
-        "claude-3.5-sonnet"
-        "gemini-2.0-flash-latest"
-        "o3-mini"
-        "deepseek-coder"
-        "gpt-4o-mini"
-    )
-
-    # Try each preferred model in order
-    for model in "${preferred_models[@]}"; do
-        if echo "$models" | grep -q "$model"; then
-            echo "$model"
-            return 0
-        fi
-    done
-
-    # If no preferred model is found, use the first available model
-    echo "$models" | head -n 1
 }
 
 # Default values
@@ -160,85 +131,39 @@ if ! jj root >/dev/null 2>&1; then
     exit 1
 fi
 
-# Get the diff for the specified files (or all changes if no files specified)
+# Check if there are any changes and show a summary
 echo -e "\n== Changes to commit =="
 if [ ${#filesets[@]} -gt 0 ]; then
     echo "Files: ${filesets[*]}"
-    diff_content=$(jj diff --no-pager --git "${filesets[@]}")
+    # Check if there are any changes
+    if ! jj diff --no-pager --summary "${filesets[@]}" | grep -q .; then
+        echo "No changes to commit" >&2
+        exit 0
+    fi
 else
     echo "All changes in working copy"
-    diff_content=$(jj diff --no-pager --git)
-fi
-
-# Check if there are any changes
-if [ -z "$diff_content" ]; then
-    echo "No changes to commit" >&2
-    exit 0
-fi
-
-# Show a summary of changes
-if [ ${#filesets[@]} -gt 0 ]; then
-    jj diff --no-pager --summary "${filesets[@]}"
-else
-    jj diff --no-pager --summary
+    # Check if there are any changes
+    if ! jj diff --no-pager --summary | grep -q .; then
+        echo "No changes to commit" >&2
+        exit 0
+    fi
 fi
 
 # Generate commit message with progress indicator
-# Check if the model is an alias and resolve it
-model_display="$model"
-if [[ "$model" == "ai-commit-message" ]]; then
-    resolved_model=$(llm aliases list 2>/dev/null | grep "^ai-commit-message" | sed 's/^ai-commit-message[[:space:]]*:[[:space:]]*//')
-    if [[ -n "$resolved_model" ]]; then
-        model_display="ai-commit-message: $resolved_model"
-    fi
-fi
+model_display=$(resolve_model_display "$model")
 
 echo -e "\n== Generating Commit Message (via ${model_display}) =="
 echo -n "Generating commit message... " >&2
 
-# Build the prompt
-if [[ -n "$custom_prompt" ]]; then
-    prompt_text="Analyze these changes and create a commit message according to the following instructions:
-
-Changes:
-\`\`\`
-$diff_content
-\`\`\`
-
-Instructions:
-\`\`\`
-$custom_prompt
-\`\`\`
-
-Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
-Do not include a summary paragraph after any list of changes.
-Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
-Don't include any other text in the response, just the commit message."
+# Get the diff and pipe it through the message generator
+# Note: jj-ai-commit doesn't have a current_desc, so pass empty string
+if [ ${#filesets[@]} -gt 0 ]; then
+    commit_msg=$(jj diff --no-pager --git "${filesets[@]}" | generate_commit_message "$model" "$custom_prompt" "")
 else
-    prompt_text="Analyze these changes and create a conventional commit message:
-
-\`\`\`
-$diff_content
-\`\`\`
-
-Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
-Do not include a summary paragraph after any list of changes.
-Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
-Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:).
-Don't include any other text in the response, just the commit message."
+    commit_msg=$(jj diff --no-pager --git | generate_commit_message "$model" "$custom_prompt" "")
 fi
-
-commit_msg=$(llm \
-    --model "$model" \
-    "$prompt_text"
-)
 
 printf "\r\033[K" >&2  # Clear progress message
-
-# Strip markdown code fences if present
-if [[ "$commit_msg" =~ ^\`\`\`.* ]] && [[ "$commit_msg" =~ \`\`\`$ ]]; then
-    commit_msg=$(echo "$commit_msg" | sed -e '1s/^```.*//' -e '$s/```$//' | sed '/^$/d')
-fi
 
 # Display the message
 echo "$commit_msg"

@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Source shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jj-ai-lib.sh"
+
 # Check for llm installation
 if ! command -v llm >/dev/null 2>&1; then
     echo "Error: llm command not found. Install from https://llm.datasette.io/en/stable/setup.html" >&2
@@ -48,39 +52,6 @@ Examples:
     $(basename "$0") xyz -f @ -t xyz     # Describe xyz using diff from @ to xyz
 EOF
     exit 1
-}
-
-# Default model selection
-select_default_model() {
-    local models
-    models=$(llm models)
-
-    # Check if we got any models
-    if [ -z "$models" ]; then
-        echo "Error: No LLM models found. Please install at least one model." >&2
-        exit 1
-    fi
-
-    # Define preferred models in order of preference
-    local preferred_models=(
-        "ai-commit-message"
-        "claude-3.5-sonnet"
-        "gemini-2.0-flash-latest"
-        "o3-mini"
-        "deepseek-coder"
-        "gpt-4o-mini"
-    )
-
-    # Try each preferred model in order
-    for model in "${preferred_models[@]}"; do
-        if echo "$models" | grep -q "$model"; then
-            echo "$model"
-            return 0
-        fi
-    done
-
-    # If no preferred model is found, use the first available model
-    echo "$models" | head -n 1
 }
 
 # Default values
@@ -205,80 +176,21 @@ if [ ${#jj_diff_args[@]} -gt 0 ]; then
 fi
 
 # Generate new commit message with progress indicator
-# Check if the model is an alias and resolve it
-model_display="$model"
-if [[ "$model" == "ai-commit-message" ]]; then
-    resolved_model=$(llm aliases list 2>/dev/null | grep "^ai-commit-message" | sed 's/^ai-commit-message[[:space:]]*:[[:space:]]*//')
-    if [[ -n "$resolved_model" ]]; then
-        model_display="ai-commit-message: $resolved_model"
-    fi
-fi
+model_display=$(resolve_model_display "$model")
 
 echo -e "\n== Generating Description (via ${model_display}) =="
 echo -n "Generating commit message... " >&2
 
-# Get the diff using provided options or default to revision's changes
+# Get the diff and pipe it through the message generator
 if [ ${#jj_diff_args[@]} -gt 0 ]; then
     # Use the custom diff arguments
-    diff_output=$(jj diff --no-pager "${jj_diff_args[@]}" --git)
+    commit_msg=$(jj diff --no-pager "${jj_diff_args[@]}" --git | generate_commit_message "$model" "$custom_prompt" "$current_desc")
 else
     # Default: use the revision's own changes
-    diff_output=$(jj diff --no-pager -r "$revision" --git)
+    commit_msg=$(jj diff --no-pager -r "$revision" --git | generate_commit_message "$model" "$custom_prompt" "$current_desc")
 fi
-
-# Build the prompt
-if [[ -n "$custom_prompt" ]]; then
-    prompt_text="Analyze these changes and create a commit message according to the following instructions:
-
-Current description:
-\`\`\`
-$current_desc
-\`\`\`
-
-Changes:
-\`\`\`
-$diff_output
-\`\`\`
-
-Instructions:
-\`\`\`
-$custom_prompt
-\`\`\`
-
-Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
-Do not include a summary paragraph after any list of changes.
-Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
-Don't include any other text in the response, just the commit message."
-else
-    prompt_text="Analyze these changes and create a conventional commit message:
-
-\`\`\`
-$diff_output
-\`\`\`
-
-Current description (if any):
-\`\`\`
-$current_desc
-\`\`\`
-
-Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
-Do not include a summary paragraph after any list of changes.
-Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
-Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:).
-Don't include any other text in the response, just the commit message."
-fi
-
-commit_msg=$(llm \
-    --model "$model" \
-    "$prompt_text"
-)
 
 printf "\r\033[K" >&2  # Clear progress message
-
-# Strip markdown code fences if present
-if [[ "$commit_msg" =~ ^\`\`\`.* ]] && [[ "$commit_msg" =~ \`\`\`$ ]]; then
-    commit_msg=$(echo "$commit_msg" | sed -e '1s/^```.*//' -e '$s/```$//' | sed '/^$/d')
-fi
 
 # Display the message
 echo "$commit_msg"
