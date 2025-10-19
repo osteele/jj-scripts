@@ -19,37 +19,41 @@ fi
 
 usage() {
     cat << EOF
-Usage: $(basename "$0") [options] [revision]
+Usage: $(basename "$0") [options] [REVSETS]...
 
-Generate a conventional commit message for a Jujutsu revision using AI.
-If no revision is specified, uses the current working copy (@).
+Generate conventional commit messages for Jujutsu revisions using AI.
+Each revset is expanded to individual revisions, and a unique message
+is generated for each revision based on its changes.
+
+If no revsets are specified, uses the current working copy (@).
 
 Options:
     -m, --model MODEL       Specify the LLM model to use (default: auto-select)
                             Examples: gpt-4, claude-3-opus, mistral-7b, ...
-    -n, --dry-run           Show the message without applying it
+    -n, --dry-run           Show the messages without applying them
     -p, --prompt PROMPT     Provide additional instructions for the message
     -l, --list              List available models
-    
+
     Diff options (passed to jj diff):
     -f, --from REVSET       Starting revset for diff
-    -t, --to REVSET         Ending revset for diff  
+    -t, --to REVSET         Ending revset for diff
     -r, --revisions REVSET  Revisions to diff (alternative to --from/--to)
-    
+
     Description options:
     --edit                  Open editor after generating the message
     --no-edit               Don't open editor (default)
     --reset-author          Reset the author to the configured user
     --author AUTHOR         Set a specific author for the revision
-    
+
     -h, --help              Show this help
 
 Examples:
-    $(basename "$0")                    # Describe @ with its own changes
-    $(basename "$0") abc123              # Describe abc123 with its own changes
-    $(basename "$0") @ --from main       # Describe @ using diff from main
-    $(basename "$0") @ -r main..@         # Describe @ using revisions syntax
-    $(basename "$0") xyz -f @ -t xyz     # Describe xyz using diff from @ to xyz
+    $(basename "$0")                    # Describe @
+    $(basename "$0") abc123             # Describe single revision
+    $(basename "$0") @- @               # Describe two revisions
+    $(basename "$0") "main..@"          # Describe all revisions from main to @
+    $(basename "$0") -n @ "fork..@-"    # Dry-run for @ and fork..@- range
+    $(basename "$0") @ --from main      # Describe @ using diff from main
 EOF
     exit 1
 }
@@ -57,12 +61,12 @@ EOF
 # Default values
 model=$(select_default_model)
 dry_run=false
-revision="@"
 custom_prompt=""
 
-# Arrays for jj arguments
+# Arrays for jj arguments and revsets
 declare -a jj_describe_args=()
 declare -a jj_diff_args=()
+declare -a revset_args=()
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -144,12 +148,17 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: Unknown option: $1" >&2
                 usage
             else
-                revision="$1"
+                revset_args+=("$1")
                 shift
             fi
             ;;
     esac
 done
+
+# Default to @ if no revsets specified
+if [ ${#revset_args[@]} -eq 0 ]; then
+    revset_args=("@")
+fi
 
 # Check if we're in a jj repository
 if ! jj root >/dev/null 2>&1; then
@@ -157,54 +166,163 @@ if ! jj root >/dev/null 2>&1; then
     exit 1
 fi
 
-# Validate the revision exists
-if ! jj log --no-pager --no-graph -r "$revision" -T 'change_id' >/dev/null 2>&1; then
-    echo "Error: Invalid revision: $revision" >&2
+# Expand revsets to individual revisions
+# Combine all revset args with | (union) and get individual revisions in topological order
+all_revsets=$(IFS='|'; echo "${revset_args[*]}")
+revisions=()
+while IFS= read -r line; do
+    [ -n "$line" ] && revisions+=("$line")
+done < <(jj log --no-graph --no-pager -r "$all_revsets" -T 'change_id.short() ++ "\n"')
+
+# Check that we got at least one revision
+if [ ${#revisions[@]} -eq 0 ]; then
+    echo "Error: No revisions matched the provided revsets" >&2
     exit 1
 fi
 
-# Get the current description
-current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+# Load additional instructions from config files (once for all revisions)
+repo_root=$(jj root)
+additional_instructions=$(load_additional_instructions "$repo_root")
 
-# Show revision info (but not the full diff)
-echo -e "\n== Revision $revision =="
-jj log --no-pager --no-graph -r "$revision"
+# Combine additional instructions with custom prompt (once for all revisions)
+combined_prompt="$additional_instructions"
+if [ -n "$custom_prompt" ]; then
+    if [ -n "$combined_prompt" ]; then
+        combined_prompt="$combined_prompt
 
-# If using diff args, show what we're diffing
-if [ ${#jj_diff_args[@]} -gt 0 ]; then
-    echo -e "\n== Using custom diff parameters =="
+"
+    fi
+    combined_prompt="$combined_prompt$custom_prompt"
 fi
 
-# Generate new commit message with progress indicator
 model_display=$(resolve_model_display "$model")
 
-echo -e "\n== Generating Description (via ${model_display}) =="
-echo -n "Generating commit message... " >&2
-
-# Get the diff and pipe it through the message generator
-if [ ${#jj_diff_args[@]} -gt 0 ]; then
-    # Use the custom diff arguments
-    commit_msg=$(jj diff --no-pager "${jj_diff_args[@]}" --git | generate_commit_message "$model" "$custom_prompt" "$current_desc")
-else
-    # Default: use the revision's own changes
-    commit_msg=$(jj diff --no-pager -r "$revision" --git | generate_commit_message "$model" "$custom_prompt" "$current_desc")
-fi
-
-printf "\r\033[K" >&2  # Clear progress message
-
-# Display the message
-echo "$commit_msg"
-
+# Process revisions based on mode (dry-run vs apply)
 if [ "$dry_run" = true ]; then
-    echo -e "\n== Next Steps =="
-    echo "To apply this message, run: $(basename "$0") $revision"
+    # Dry-run mode: generate all messages first, then display all
+    declare -a generated_messages=()
+
+    for revision in "${revisions[@]}"; do
+        # Get the current description
+        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+
+        # Generate message with progress indicator
+        echo -n "Generating message for $revision... " >&2
+
+        # Get the diff and pipe it through the message generator
+        if [ ${#jj_diff_args[@]} -gt 0 ]; then
+            # Use the custom diff arguments
+            commit_msg=$(jj diff --no-pager "${jj_diff_args[@]}" --git | generate_commit_message "$model" "$combined_prompt" "$current_desc")
+        else
+            # Default: use the revision's own changes
+            commit_msg=$(jj diff --no-pager -r "$revision" --git | generate_commit_message "$model" "$combined_prompt" "$current_desc")
+        fi
+
+        # Check if generation succeeded
+        if [ $? -ne 0 ]; then
+            printf "\r\033[K" >&2
+            echo "Error: Failed to generate message for revision $revision" >&2
+            exit 1
+        fi
+
+        printf "\r\033[K" >&2  # Clear progress message
+
+        # Store the generated message
+        generated_messages+=("$commit_msg")
+    done
+
+    # Display all generated messages
+    for i in "${!revisions[@]}"; do
+        revision="${revisions[$i]}"
+        commit_msg="${generated_messages[$i]}"
+
+        echo -e "\n=========================================="
+        echo "== Revision $revision =="
+
+        # Get and show current description
+        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+        if [ -n "$current_desc" ]; then
+            first_line=$(echo "$current_desc" | head -n 1)
+            echo "Previous description: $first_line"
+            echo
+        fi
+
+        # Show list of changed files
+        jj diff --no-pager --summary -r "$revision"
+
+        echo -e "\n== Generated Description (via ${model_display}) =="
+        echo "$commit_msg"
+    done
+
+    echo -e "\n=========================================="
+    echo "Dry-run complete. No descriptions were applied."
+    echo "Processed ${#revisions[@]} revision(s)."
 else
-    echo -e "\n== Applying new description ==" >&2
-    
-    # Apply the new description to the revision
-    if [ ${#jj_describe_args[@]} -gt 0 ]; then
-        jj describe -r "$revision" -m "$commit_msg" "${jj_describe_args[@]}" && echo "Description updated successfully!"
-    else
-        jj describe -r "$revision" -m "$commit_msg" && echo "Description updated successfully!"
-    fi
+    # Apply mode: generate and apply each revision sequentially
+    for revision in "${revisions[@]}"; do
+        echo -e "\n=========================================="
+        echo "== Processing revision $revision =="
+
+        # Get the current description
+        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+
+        # Show first line of previous description if it exists
+        if [ -n "$current_desc" ]; then
+            first_line=$(echo "$current_desc" | head -n 1)
+            echo "Previous description: $first_line"
+            echo
+        fi
+
+        # Show list of changed files
+        jj diff --no-pager --summary -r "$revision"
+
+        # If using diff args, show what we're diffing
+        if [ ${#jj_diff_args[@]} -gt 0 ]; then
+            echo -e "\n== Using custom diff parameters =="
+        fi
+
+        # Generate message with progress indicator
+        echo -e "\n== Generating Description (via ${model_display}) =="
+        echo -n "Generating commit message... " >&2
+
+        # Get the diff and pipe it through the message generator
+        if [ ${#jj_diff_args[@]} -gt 0 ]; then
+            # Use the custom diff arguments
+            commit_msg=$(jj diff --no-pager "${jj_diff_args[@]}" --git | generate_commit_message "$model" "$combined_prompt" "$current_desc")
+        else
+            # Default: use the revision's own changes
+            commit_msg=$(jj diff --no-pager -r "$revision" --git | generate_commit_message "$model" "$combined_prompt" "$current_desc")
+        fi
+
+        # Check if generation succeeded
+        if [ $? -ne 0 ]; then
+            printf "\r\033[K" >&2
+            echo "Error: Failed to generate message for revision $revision" >&2
+            exit 1
+        fi
+
+        printf "\r\033[K" >&2  # Clear progress message
+
+        # Display the message
+        echo "$commit_msg"
+
+        # Apply the new description to the revision
+        echo -e "\n== Applying new description ==" >&2
+        if [ ${#jj_describe_args[@]} -gt 0 ]; then
+            jj describe -r "$revision" -m "$commit_msg" "${jj_describe_args[@]}"
+        else
+            jj describe -r "$revision" -m "$commit_msg"
+        fi
+
+        # Check if application succeeded
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to apply description for revision $revision" >&2
+            exit 1
+        fi
+
+        echo "✓ Description applied successfully"
+    done
+
+    echo -e "\n=========================================="
+    echo "Successfully processed ${#revisions[@]} revision(s)."
 fi

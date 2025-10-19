@@ -114,6 +114,25 @@ jj-file-untrack-ignored
 jj-file-untrack-ignored --dry-run
 ```
 
+### `jj-file-delete`
+Remove files matching glob patterns from all revisions in a revset. Useful for removing accidentally committed files, build artifacts, or sensitive data from multiple revisions at once.
+
+```bash
+# Remove a specific file from all revisions in pk::
+jj-file-delete -r "pk::" parallel-differential-coding-slepian-wolf-analysis.md
+
+# Remove all .md files from revisions
+jj-file-delete -r "main..@" "*.md"
+
+# Remove multiple patterns with dry-run
+jj-file-delete -n -r "pk::" "*.log" "*.aux" "build/**"
+
+# Remove files from specific revisions
+jj-file-delete -r "@- | @" temp.txt
+```
+
+The script processes revisions in topological order and skips any revisions where the file patterns don't match. Descendant revisions are automatically rebased as needed.
+
 ## AI-Assisted Jujutsu Tools
 
 These AI-powered tools use the `llm` command-line tool to generate conventional commit messages. You can configure a custom model for all commit message generation by setting an alias:
@@ -132,8 +151,32 @@ llm aliases
 llm aliases remove ai-commit-message
 ```
 
+#### Customizing AI Instructions
+
+You can provide additional instructions to guide the AI's commit message generation using instruction files. Instructions from multiple sources are combined:
+
+1. **Global instructions** (`~/.config/ai-commit-instructions`) - applies to all repositories
+2. **Per-project instructions** (`.ai-commit-instructions` in repo root) - applies only to the current project
+3. **Command-line prompt** (`--prompt` option) - applies to a single invocation
+
+**Example global instructions** (`~/.config/ai-commit-instructions`):
+```
+Use conventional commit format.
+Keep commit titles under 50 characters.
+Use imperative mood in the commit title.
+```
+
+**Example project-specific instructions** (`.ai-commit-instructions`):
+```
+Don't mention "Slepian-Wolf" in commit messages since it's implied by the project context.
+Focus on what changed, not the project domain.
+Emphasize performance implications of algorithmic changes.
+```
+
+The `.ai-commit-instructions` file can be version-controlled and shared with your team to ensure consistent commit message style across all contributors.
+
 ### `jj-ai-describe`
-Generates conventional commit messages for Jujutsu revisions using AI. Analyzes the changes in a revision and creates a descriptive commit message following conventional commit format.
+Generates conventional commit messages for Jujutsu revisions using AI. Analyzes the changes in each revision and creates descriptive commit messages following conventional commit format. Accepts multiple revset arguments, and each revset is expanded to individual revisions with unique messages generated for each.
 
 ```bash
 # Generate and apply message for current working copy
@@ -141,17 +184,24 @@ jj-ai-describe
 # Or with the alias: jj ai-describe
 
 # Generate message for a specific revision
-jj-ai-describe <revision>
+jj-ai-describe abc123
 
-# Preview the message without applying it
-jj-ai-describe -n
+# Generate messages for multiple revisions
+jj-ai-describe @- @                    # Two specific revisions
+jj-ai-describe "main..@"               # All revisions from main to @
+jj-ai-describe @ "fork..@-"            # @ plus all revisions in range
+
+# Preview messages without applying them
+jj-ai-describe -n "main..@"            # Dry-run for all revisions in range
 
 # Use a specific LLM model
-jj-ai-describe --model gpt-4
+jj-ai-describe --model gpt-4 @- @
 
-# Provide additional instructions for the message
-jj-ai-describe --prompt "Focus on the performance improvements"
+# Provide additional instructions for the messages
+jj-ai-describe --prompt "Focus on the performance improvements" "main..@"
 ```
+
+**Note**: When processing multiple revisions, the script stops on the first error. In dry-run mode, all messages are generated first and then displayed together.
 
 ### `jj-ai-commit`
 Creates a new change with an AI-generated commit message, similar to `jj commit`. The AI analyzes the specified changes (or all changes) and creates a conventional commit message. Unlike `jj-ai-describe`, this command accepts filesets to selectively commit specific files.

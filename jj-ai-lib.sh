@@ -54,6 +54,34 @@ resolve_model_display() {
     echo "$model_display"
 }
 
+# Load additional instructions from global and project files
+# Arguments:
+#   $1 - repository root path
+# Returns: Combined instructions from global and project files
+load_additional_instructions() {
+    local repo_root="$1"
+    local instructions=""
+
+    # Load global instructions
+    local global_file="$HOME/.config/ai-commit-instructions"
+    if [ -f "$global_file" ]; then
+        instructions=$(cat "$global_file")
+    fi
+
+    # Load project-local instructions
+    local project_file="$repo_root/.ai-commit-instructions"
+    if [ -f "$project_file" ]; then
+        if [ -n "$instructions" ]; then
+            instructions="$instructions
+
+"
+        fi
+        instructions="$instructions$(cat "$project_file")"
+    fi
+
+    echo "$instructions"
+}
+
 # Sanitize UTF-8 input by replacing invalid sequences
 # Reads from stdin, writes sanitized output to stdout
 sanitize_utf8() {
@@ -121,7 +149,30 @@ $custom_prompt
 
 Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
 Do not include a summary paragraph after any list of changes.
-Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
+
+FORMATTING RULES:
+- Commit messages are viewed as plain text, not rendered markdown
+- Use backticks for \`code\`, \`filenames\`, and \`identifiers\`
+- Do NOT use **bold** or *italic* markdown
+- Write bullet lists as plain text with simple dashes (-)
+- Keep formatting minimal and readable as plain text
+
+GOOD EXAMPLE:
+feat: Add gradient compression pipeline
+
+- Implement bucket-based quantization codec
+- Add compression ratio calculation in \`metrics.py\`
+- Support 8-bit and 16-bit quantization modes
+- Update documentation with usage examples
+
+AVOID (too much markdown):
+feat: Add gradient compression pipeline
+
+- **Implement** bucket-based quantization codec
+- Add compression ratio calculation in **metrics.py**
+- Support **8-bit** and **16-bit** quantization modes
+- Update **documentation** with usage examples
+
 Don't include any other text in the response, just the commit message."
     else
         prompt_text="Analyze these changes and create a conventional commit message:
@@ -143,8 +194,31 @@ $current_desc
 
 Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
 Do not include a summary paragraph after any list of changes.
-Do not use Markdown emphasis such as **bold**, *italics*, or similar styling.
 Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:).
+
+FORMATTING RULES:
+- Commit messages are viewed as plain text, not rendered markdown
+- Use backticks for \`code\`, \`filenames\`, and \`identifiers\`
+- Do NOT use **bold** or *italic* markdown
+- Write bullet lists as plain text with simple dashes (-)
+- Keep formatting minimal and readable as plain text
+
+GOOD EXAMPLE:
+feat: Add gradient compression pipeline
+
+- Implement bucket-based quantization codec
+- Add compression ratio calculation in \`metrics.py\`
+- Support 8-bit and 16-bit quantization modes
+- Update documentation with usage examples
+
+AVOID (too much markdown):
+feat: Add gradient compression pipeline
+
+- **Implement** bucket-based quantization codec
+- Add compression ratio calculation in **metrics.py**
+- Support **8-bit** and **16-bit** quantization modes
+- Update **documentation** with usage examples
+
 Don't include any other text in the response, just the commit message."
     fi
 

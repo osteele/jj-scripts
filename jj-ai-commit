@@ -149,6 +149,21 @@ else
     fi
 fi
 
+# Load additional instructions from config files
+repo_root=$(jj root)
+additional_instructions=$(load_additional_instructions "$repo_root")
+
+# Combine additional instructions with custom prompt
+combined_prompt="$additional_instructions"
+if [ -n "$custom_prompt" ]; then
+    if [ -n "$combined_prompt" ]; then
+        combined_prompt="$combined_prompt
+
+"
+    fi
+    combined_prompt="$combined_prompt$custom_prompt"
+fi
+
 # Generate commit message with progress indicator
 model_display=$(resolve_model_display "$model")
 
@@ -158,9 +173,9 @@ echo -n "Generating commit message... " >&2
 # Get the diff and pipe it through the message generator
 # Note: jj-ai-commit doesn't have a current_desc, so pass empty string
 if [ ${#filesets[@]} -gt 0 ]; then
-    commit_msg=$(jj diff --no-pager --git "${filesets[@]}" | generate_commit_message "$model" "$custom_prompt" "")
+    commit_msg=$(jj diff --no-pager --git "${filesets[@]}" | generate_commit_message "$model" "$combined_prompt" "")
 else
-    commit_msg=$(jj diff --no-pager --git | generate_commit_message "$model" "$custom_prompt" "")
+    commit_msg=$(jj diff --no-pager --git | generate_commit_message "$model" "$combined_prompt" "")
 fi
 
 printf "\r\033[K" >&2  # Clear progress message
