@@ -1,0 +1,288 @@
+#!/bin/bash
+set -euo pipefail
+
+# Source shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jj-ai-lib.sh"
+
+# Check for llm installation
+if ! command -v llm >/dev/null 2>&1; then
+    echo "Error: llm command not found. Install from https://llm.datasette.io/en/stable/setup.html" >&2
+    exit 1
+fi
+
+# Check for jj installation
+if ! command -v jj >/dev/null 2>&1; then
+    echo "Error: jj command not found. Install from https://github.com/martinvonz/jj" >&2
+    exit 1
+fi
+
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [options] --prompt INSTRUCTIONS [REVSETS]...
+
+Revise existing commit descriptions for Jujutsu revisions according to instructions.
+Each revset is expanded to individual revisions, and each description is revised
+according to the provided prompt.
+
+Only revisions with non-empty descriptions are processed. Revisions with empty
+descriptions are skipped.
+
+If no revsets are specified, uses the current working copy (@).
+
+Options:
+    -p, --prompt PROMPT     Instructions for how to revise the descriptions (required)
+                            Examples: "Remove bold markup", "Be more concise",
+                                     "Don't mention the project name"
+    -m, --model MODEL       Specify the LLM model to use (default: auto-select)
+                            Examples: gpt-4, claude-3-opus, mistral-7b, ...
+    -n, --dry-run           Show the revised messages without applying them
+    -l, --list              List available models
+
+    Description options:
+    --edit                  Open editor after generating the message
+    --no-edit               Don't open editor (default)
+    --reset-author          Reset the author to the configured user
+    --author AUTHOR         Set a specific author for the revision
+
+    -h, --help              Show this help
+
+Examples:
+    $(basename "$0") -p "Remove bold markup" "main..@"
+    $(basename "$0") -p "Be more concise" @-
+    $(basename "$0") -p "Don't mention Slepian-Wolf" -n "pk::"
+    $(basename "$0") -p "Use imperative mood" @ @-
+EOF
+    exit 1
+}
+
+# Default values
+model=$(select_default_model)
+dry_run=false
+revision_prompt=""
+
+# Arrays for jj arguments and revsets
+declare -a jj_describe_args=()
+declare -a revset_args=()
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m|--model)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --model requires an argument" >&2
+                exit 1
+            fi
+            model="$2"
+            shift 2
+            ;;
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        -l|--list)
+            echo "Available models:"
+            llm models
+            exit 0
+            ;;
+        -p|--prompt)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --prompt requires an argument" >&2
+                exit 1
+            fi
+            revision_prompt="$2"
+            shift 2
+            ;;
+        --edit)
+            jj_describe_args+=("--edit")
+            shift
+            ;;
+        --no-edit)
+            jj_describe_args+=("--no-edit")
+            shift
+            ;;
+        --reset-author)
+            jj_describe_args+=("--reset-author")
+            shift
+            ;;
+        --author)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --author requires an argument" >&2
+                exit 1
+            fi
+            jj_describe_args+=("--author" "$2")
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            if [[ $1 == -* ]]; then
+                echo "Error: Unknown option: $1" >&2
+                usage
+            else
+                revset_args+=("$1")
+                shift
+            fi
+            ;;
+    esac
+done
+
+# Check that --prompt was provided
+if [ -z "$revision_prompt" ]; then
+    echo "Error: --prompt is required" >&2
+    usage
+fi
+
+# Default to @ if no revsets specified
+if [ ${#revset_args[@]} -eq 0 ]; then
+    revset_args=("@")
+fi
+
+# Check if we're in a jj repository
+if ! jj root >/dev/null 2>&1; then
+    echo "Error: Not in a Jujutsu repository" >&2
+    exit 1
+fi
+
+# Expand revsets to individual revisions
+# Combine all revset args with | (union) and get individual revisions in topological order
+all_revsets=$(IFS='|'; echo "${revset_args[*]}")
+revisions=()
+while IFS= read -r line; do
+    [ -n "$line" ] && revisions+=("$line")
+done < <(jj log --no-graph --no-pager -r "$all_revsets" -T 'change_id.short() ++ "\n"')
+
+# Check that we got at least one revision
+if [ ${#revisions[@]} -eq 0 ]; then
+    echo "Error: No revisions matched the provided revsets" >&2
+    exit 1
+fi
+
+# Filter to only non-empty descriptions
+filtered_revisions=()
+for revision in "${revisions[@]}"; do
+    has_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'if(description, "yes", "")')
+    if [ -n "$has_desc" ]; then
+        filtered_revisions+=("$revision")
+    fi
+done
+
+# Update revisions array
+revisions=("${filtered_revisions[@]}")
+
+# Check if we have any revisions left after filtering
+if [ ${#revisions[@]} -eq 0 ]; then
+    echo "No revisions with descriptions found. Nothing to revise." >&2
+    exit 0
+fi
+
+echo "Processing ${#revisions[@]} revision(s) with descriptions"
+
+# Load additional instructions from config files (once for all revisions)
+repo_root=$(jj root)
+additional_instructions=$(load_additional_instructions "$repo_root")
+
+model_display=$(resolve_model_display "$model")
+
+# Process revisions based on mode (dry-run vs apply)
+if [ "$dry_run" = true ]; then
+    # Dry-run mode: generate all messages first, then display all
+    declare -a generated_messages=()
+
+    for revision in "${revisions[@]}"; do
+        # Get the current description
+        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+
+        # Generate revised message with progress indicator
+        echo -n "Revising message for $revision... " >&2
+
+        # Generate revised description
+        revised_msg=$(generate_revision_message "$model" "$revision_prompt" "$additional_instructions" "$current_desc")
+
+        # Check if generation succeeded
+        if [ $? -ne 0 ]; then
+            printf "\r\033[K" >&2
+            echo "Error: Failed to revise message for revision $revision" >&2
+            exit 1
+        fi
+
+        printf "\r\033[K" >&2  # Clear progress message
+
+        # Store the generated message
+        generated_messages+=("$revised_msg")
+    done
+
+    # Display all generated messages
+    for i in "${!revisions[@]}"; do
+        revision="${revisions[$i]}"
+        revised_msg="${generated_messages[$i]}"
+
+        echo -e "\n=========================================="
+        echo "== Revision $revision =="
+
+        # Get and show current description
+        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+
+        echo -e "\n== Current Description =="
+        echo "$current_desc"
+
+        echo -e "\n== Revised Description (via ${model_display}) =="
+        echo "$revised_msg"
+    done
+
+    echo -e "\n=========================================="
+    echo "Dry-run complete. No descriptions were applied."
+    echo "Processed ${#revisions[@]} revision(s)."
+else
+    # Apply mode: generate and apply each revision sequentially
+    for revision in "${revisions[@]}"; do
+        echo -e "\n=========================================="
+        echo "== Processing revision $revision =="
+
+        # Get the current description
+        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+
+        # Show current description
+        echo -e "\n== Current Description =="
+        echo "$current_desc"
+
+        # Generate revised message with progress indicator
+        echo -e "\n== Generating Revised Description (via ${model_display}) =="
+        echo -n "Revising commit message... " >&2
+
+        # Generate revised description
+        revised_msg=$(generate_revision_message "$model" "$revision_prompt" "$additional_instructions" "$current_desc")
+
+        # Check if generation succeeded
+        if [ $? -ne 0 ]; then
+            printf "\r\033[K" >&2
+            echo "Error: Failed to revise message for revision $revision" >&2
+            exit 1
+        fi
+
+        printf "\r\033[K" >&2  # Clear progress message
+
+        # Display the revised message
+        echo "$revised_msg"
+
+        # Apply the new description to the revision
+        echo -e "\n== Applying revised description ==" >&2
+        if [ ${#jj_describe_args[@]} -gt 0 ]; then
+            jj describe -r "$revision" -m "$revised_msg" "${jj_describe_args[@]}"
+        else
+            jj describe -r "$revision" -m "$revised_msg"
+        fi
+
+        # Check if application succeeded
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to apply description for revision $revision" >&2
+            exit 1
+        fi
+
+        echo "✓ Description revised successfully"
+    done
+
+    echo -e "\n=========================================="
+    echo "Successfully processed ${#revisions[@]} revision(s)."
+fi

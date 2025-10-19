@@ -14,6 +14,7 @@ To use the AI tools as jj subcommands (like `jj ai-describe`), add these aliases
 ```bash
 jj config set --user 'aliases.ai-describe' '["util", "exec", "--", "jj-ai-describe"]'
 jj config set --user 'aliases.ai-commit' '["util", "exec", "--", "jj-ai-commit"]'
+jj config set --user 'aliases.ai-revise' '["util", "exec", "--", "jj-ai-revise"]'
 ```
 
 ## Jujutsu Tools
@@ -178,18 +179,23 @@ The `.ai-commit-instructions` file can be version-controlled and shared with you
 ### `jj-ai-describe`
 Generates conventional commit messages for Jujutsu revisions using AI. Analyzes the changes in each revision and creates descriptive commit messages following conventional commit format. Accepts multiple revset arguments, and each revset is expanded to individual revisions with unique messages generated for each.
 
+**By default, only revisions with empty descriptions are processed.** Use `--replace` to process all revisions regardless of their current description.
+
 ```bash
-# Generate and apply message for current working copy
+# Generate and apply message for current working copy (if empty)
 jj-ai-describe
 # Or with the alias: jj ai-describe
 
-# Generate message for a specific revision
+# Generate message for a specific revision (if empty)
 jj-ai-describe abc123
 
-# Generate messages for multiple revisions
+# Generate messages for multiple revisions (only those with empty descriptions)
 jj-ai-describe @- @                    # Two specific revisions
 jj-ai-describe "main..@"               # All revisions from main to @
 jj-ai-describe @ "fork..@-"            # @ plus all revisions in range
+
+# Replace existing descriptions (even non-empty ones)
+jj-ai-describe --replace "main..@"
 
 # Preview messages without applying them
 jj-ai-describe -n "main..@"            # Dry-run for all revisions in range
@@ -201,7 +207,7 @@ jj-ai-describe --model gpt-4 @- @
 jj-ai-describe --prompt "Focus on the performance improvements" "main..@"
 ```
 
-**Note**: When processing multiple revisions, the script stops on the first error. In dry-run mode, all messages are generated first and then displayed together.
+**Note**: When processing multiple revisions, the script stops on the first error. In dry-run mode, all messages are generated first and then displayed together. If a revset contains no revisions with empty descriptions, the command exits with an error (unless `--replace` is used).
 
 ### `jj-ai-commit`
 Creates a new change with an AI-generated commit message, similar to `jj commit`. The AI analyzes the specified changes (or all changes) and creates a conventional commit message. Unlike `jj-ai-describe`, this command accepts filesets to selectively commit specific files.
@@ -233,6 +239,41 @@ jj-ai-commit --edit
 # List available models
 jj-ai-commit -l
 ```
+
+### `jj-ai-revise`
+Revises existing commit descriptions according to instructions using AI. This command modifies existing descriptions based on a prompt, without looking at the actual code changes. Useful for applying consistent style changes across multiple commits, such as removing markdown formatting, making descriptions more concise, or removing redundant information.
+
+**Only revisions with non-empty descriptions are processed.** Revisions with empty descriptions are automatically skipped.
+
+```bash
+# Revise descriptions to remove bold markdown
+jj-ai-revise --prompt "Remove bold markup" "main..@"
+# Or with the alias: jj ai-revise --prompt "Remove bold markup" "main..@"
+
+# Make descriptions more concise
+jj-ai-revise --prompt "Be more concise" @-
+
+# Remove redundant project-specific mentions
+jj-ai-revise --prompt "Don't mention Slepian-Wolf; it's implicit" "pk::"
+
+# Preview revisions without applying them
+jj-ai-revise -n --prompt "Use imperative mood" "main..@"
+
+# Revise multiple specific revisions
+jj-ai-revise --prompt "Remove technical jargon" @ @- @--
+
+# Use a specific LLM model
+jj-ai-revise --model gpt-4 --prompt "Simplify language" "main..@"
+```
+
+**Example use cases:**
+- Remove markdown formatting (bold, italics) from commit messages
+- Make commit messages more concise or verbose
+- Remove project-specific terminology that's implicit in context
+- Change tone or style (e.g., imperative mood vs. past tense)
+- Fix grammar or spelling consistently across multiple commits
+
+**Note**: The revision prompt is combined with any instructions from `.ai-commit-instructions` files, so project-specific conventions are automatically applied.
 
 ## License
 

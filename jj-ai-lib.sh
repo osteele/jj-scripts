@@ -235,3 +235,73 @@ Don't include any other text in the response, just the commit message."
 
     echo "$commit_msg"
 }
+
+# Revise a commit description according to instructions using AI
+# Arguments:
+#   $1 - model name
+#   $2 - revision prompt (instructions for how to revise)
+#   $3 - additional instructions (optional, can be empty)
+#   $4 - current description
+# Returns: Revised commit description
+generate_revision_message() {
+    local model="$1"
+    local revision_prompt="$2"
+    local additional_instructions="$3"
+    local current_desc="$4"
+
+    # Check if current description is empty
+    if [ -z "$current_desc" ]; then
+        echo "Error: Cannot revise empty description" >&2
+        return 1
+    fi
+
+    # Build the prompt
+    local prompt_text="Revise the following commit description according to the instructions below.
+
+Current description:
+\`\`\`
+$current_desc
+\`\`\`
+
+Revision instructions:
+\`\`\`
+$revision_prompt
+\`\`\`"
+
+    if [[ -n "$additional_instructions" ]]; then
+        prompt_text="$prompt_text
+
+Additional instructions:
+\`\`\`
+$additional_instructions
+\`\`\`"
+    fi
+
+    prompt_text="$prompt_text
+
+IMPORTANT:
+- Maintain the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:)
+- Keep the same commit type unless the instructions explicitly ask to change it
+- Apply the revision instructions while preserving the essential meaning
+- Output only the revised commit message, nothing else
+
+FORMATTING RULES:
+- Commit messages are viewed as plain text, not rendered markdown
+- Use backticks for \`code\`, \`filenames\`, and \`identifiers\`
+- Do NOT use **bold** or *italic* markdown
+- Write bullet lists as plain text with simple dashes (-)
+- Keep formatting minimal and readable as plain text
+
+Don't include any other text in the response, just the revised commit message."
+
+    # Generate revised message using llm
+    local revised_msg
+    revised_msg=$(echo "$prompt_text" | llm --model "$model")
+
+    # Strip markdown code fences if present
+    if [[ "$revised_msg" =~ ^\`\`\`.* ]] && [[ "$revised_msg" =~ \`\`\`$ ]]; then
+        revised_msg=$(echo "$revised_msg" | sed -e '1s/^```.*//' -e '$s/```$//' | sed '/^$/d')
+    fi
+
+    echo "$revised_msg"
+}

@@ -25,6 +25,9 @@ Generate conventional commit messages for Jujutsu revisions using AI.
 Each revset is expanded to individual revisions, and a unique message
 is generated for each revision based on its changes.
 
+By default, only revisions with empty descriptions are processed.
+Use --replace to process all revisions regardless of their current description.
+
 If no revsets are specified, uses the current working copy (@).
 
 Options:
@@ -32,6 +35,7 @@ Options:
                             Examples: gpt-4, claude-3-opus, mistral-7b, ...
     -n, --dry-run           Show the messages without applying them
     -p, --prompt PROMPT     Provide additional instructions for the message
+    --replace               Process all revisions, replacing existing descriptions
     -l, --list              List available models
 
     Diff options (passed to jj diff):
@@ -48,12 +52,13 @@ Options:
     -h, --help              Show this help
 
 Examples:
-    $(basename "$0")                    # Describe @
-    $(basename "$0") abc123             # Describe single revision
-    $(basename "$0") @- @               # Describe two revisions
-    $(basename "$0") "main..@"          # Describe all revisions from main to @
-    $(basename "$0") -n @ "fork..@-"    # Dry-run for @ and fork..@- range
-    $(basename "$0") @ --from main      # Describe @ using diff from main
+    $(basename "$0")                    # Describe @ (if empty)
+    $(basename "$0") abc123             # Describe single revision (if empty)
+    $(basename "$0") @- @               # Describe two revisions (only if empty)
+    $(basename "$0") "main..@"          # Describe revisions from main to @ (only empty ones)
+    $(basename "$0") --replace "main..@" # Replace all descriptions, even non-empty
+    $(basename "$0") -n @ "fork..@-"    # Dry-run for @ and fork..@- range (only empty)
+    $(basename "$0") @ --from main      # Describe @ using diff from main (if empty)
 EOF
     exit 1
 }
@@ -62,6 +67,7 @@ EOF
 model=$(select_default_model)
 dry_run=false
 custom_prompt=""
+replace_mode=false
 
 # Arrays for jj arguments and revsets
 declare -a jj_describe_args=()
@@ -95,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             fi
             custom_prompt="$2"
             shift 2
+            ;;
+        --replace)
+            replace_mode=true
+            shift
             ;;
         -f|--from)
             if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
@@ -178,6 +188,39 @@ done < <(jj log --no-graph --no-pager -r "$all_revsets" -T 'change_id.short() ++
 if [ ${#revisions[@]} -eq 0 ]; then
     echo "Error: No revisions matched the provided revsets" >&2
     exit 1
+fi
+
+# Filter to only empty descriptions unless --replace is specified
+if [ "$replace_mode" = false ]; then
+    # First, validate that each revset has at least one empty description
+    for revset_arg in "${revset_args[@]}"; do
+        empty_count=$(jj log --no-graph --no-pager -r "$revset_arg" -T 'if(description, "", change_id.short() ++ "\n")' | grep -c '^' || true)
+        if [ "$empty_count" -eq 0 ]; then
+            echo "Error: Revset '$revset_arg' contains no revisions with empty descriptions" >&2
+            echo "Use --replace to process revisions with existing descriptions" >&2
+            exit 1
+        fi
+    done
+
+    # Filter revisions to only those with empty descriptions
+    filtered_revisions=()
+    for revision in "${revisions[@]}"; do
+        has_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'if(description, "yes", "")')
+        if [ -z "$has_desc" ]; then
+            filtered_revisions+=("$revision")
+        fi
+    done
+
+    # Update revisions array
+    revisions=("${filtered_revisions[@]}")
+
+    # Check if we have any revisions left after filtering
+    if [ ${#revisions[@]} -eq 0 ]; then
+        echo "No revisions with empty descriptions found" >&2
+        exit 0
+    fi
+
+    echo "Processing ${#revisions[@]} revision(s) with empty descriptions"
 fi
 
 # Load additional instructions from config files (once for all revisions)
