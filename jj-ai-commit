@@ -135,15 +135,16 @@ fi
 echo -e "\n== Changes to commit =="
 if [ ${#filesets[@]} -gt 0 ]; then
     echo "Files: ${filesets[*]}"
-    # Check if there are any changes
-    if ! jj diff --no-pager --summary "${filesets[@]}" | grep -q .; then
-        echo "No changes to commit" >&2
+    # Check if there are any changes in the specified files
+    if ! jj diff --no-pager --summary "${filesets[@]}" 2>/dev/null | grep -q '^'; then
+        echo "No changes to commit in specified files" >&2
         exit 0
     fi
 else
     echo "All changes in working copy"
-    # Check if there are any changes
-    if ! jj diff --no-pager --summary | grep -q .; then
+    # Check if there are any changes in the working copy
+    # Check if jj diff produces any output
+    if ! jj diff --no-pager --stat 2>/dev/null | grep -q '^'; then
         echo "No changes to commit" >&2
         exit 0
     fi
