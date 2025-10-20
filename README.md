@@ -207,7 +207,12 @@ jj-ai-describe --model gpt-4 @- @
 jj-ai-describe --prompt "Focus on the performance improvements" "main..@"
 ```
 
-**Note**: When processing multiple revisions, the script stops on the first error. In dry-run mode, all messages are generated first and then displayed together. If a revset contains no revisions with empty descriptions, the command exits with an error (unless `--replace` is used).
+**Note**:
+- When processing multiple revisions, the script stops on the first error
+- In dry-run mode, all messages are generated first and then displayed together
+- If a revset contains no revisions with empty descriptions, the command exits with an error (unless `--replace` is used)
+- Revisions with no changes (empty commits) are automatically skipped
+- If ALL revisions in a revset have no changes, the command exits with an error
 
 ### `jj-ai-commit`
 Creates a new change with an AI-generated commit message, similar to `jj commit`. The AI analyzes the specified changes (or all changes) and creates a conventional commit message. Unlike `jj-ai-describe`, this command accepts filesets to selectively commit specific files.

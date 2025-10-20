@@ -219,8 +219,95 @@ if [ "$replace_mode" = false ]; then
         echo "No revisions with empty descriptions found" >&2
         exit 0
     fi
+fi
 
-    echo "Processing ${#revisions[@]} revision(s) with empty descriptions"
+# Filter out revisions with no changes and validate per-revset
+# First, check all revisions once to see which have changes
+# Build two parallel arrays since bash 3.2 doesn't support associative arrays
+revisions_to_check=("${revisions[@]}")
+revisions_with_changes_flags=()
+
+for revision in "${revisions_to_check[@]}"; do
+    # Check if revision has any diff content
+    # Always check the revision's own changes, not custom diff args
+    diff_content=$(jj diff --no-pager -r "$revision" --git 2>/dev/null || true)
+
+    if [ -n "$diff_content" ]; then
+        revisions_with_changes_flags+=("1")
+    else
+        revisions_with_changes_flags+=("0")
+    fi
+done
+
+# Helper function to check if a revision has changes
+revision_has_changes() {
+    local target_rev="$1"
+    for i in "${!revisions_to_check[@]}"; do
+        if [ "${revisions_to_check[$i]}" = "$target_rev" ]; then
+            [ "${revisions_with_changes_flags[$i]}" = "1" ]
+            return $?
+        fi
+    done
+    return 1
+}
+
+# Now validate that each revset has at least one revision with changes
+for revset_arg in "${revset_args[@]}"; do
+    # Get all revisions from this revset (after description filtering)
+    revset_revisions=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && revset_revisions+=("$line")
+    done < <(jj log --no-graph --no-pager -r "$revset_arg" -T 'change_id.short() ++ "\n"')
+
+    # Filter to only those we're planning to process (in our filtered list)
+    relevant_revisions=()
+    for rev in "${revset_revisions[@]}"; do
+        for candidate in "${revisions[@]}"; do
+            if [ "$rev" = "$candidate" ]; then
+                relevant_revisions+=("$rev")
+                break
+            fi
+        done
+    done
+
+    # Count how many have changes
+    revisions_with_changes_count=0
+    for revision in "${relevant_revisions[@]}"; do
+        if revision_has_changes "$revision"; then
+            ((revisions_with_changes_count++)) || true
+        fi
+    done
+
+    # If this revset had relevant revisions but none have changes, error
+    if [ ${#relevant_revisions[@]} -gt 0 ] && [ "$revisions_with_changes_count" -eq 0 ]; then
+        echo "Error: All revisions in revset '$revset_arg' have no changes" >&2
+        exit 1
+    fi
+done
+
+# Filter the global revisions list to only those with changes
+filtered_revisions=()
+for i in "${!revisions[@]}"; do
+    if [ "${revisions_with_changes_flags[$i]}" = "1" ]; then
+        filtered_revisions+=("${revisions[$i]}")
+    fi
+done
+
+# Update revisions array
+original_count=${#revisions[@]}
+revisions=("${filtered_revisions[@]}")
+skipped=$((original_count - ${#revisions[@]}))
+
+# Check if we have any revisions left after filtering
+if [ ${#revisions[@]} -eq 0 ]; then
+    echo "No revisions with changes found" >&2
+    exit 0
+fi
+
+if [ "$skipped" -gt 0 ]; then
+    echo "Processing ${#revisions[@]} revision(s) (skipped $skipped without changes)"
+else
+    echo "Processing ${#revisions[@]} revision(s)"
 fi
 
 # Load additional instructions from config files (once for all revisions)
