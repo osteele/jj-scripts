@@ -196,8 +196,19 @@ if [ "$replace_mode" = false ]; then
     for revset_arg in "${revset_args[@]}"; do
         empty_count=$(jj log --no-graph --no-pager -r "$revset_arg" -T 'if(description, "", change_id.short() ++ "\n")' | grep -c '^' || true)
         if [ "$empty_count" -eq 0 ]; then
+            # Get count of revisions with descriptions
+            total_count=$(jj log --no-graph --no-pager -r "$revset_arg" -T 'change_id.short() ++ "\n"' | grep -c '^' || true)
+
             echo "Error: Revset '$revset_arg' contains no revisions with empty descriptions" >&2
-            echo "Use --replace to process revisions with existing descriptions" >&2
+            if [ "$total_count" -eq 1 ]; then
+                # Show the description for single revision
+                desc_preview=$(jj log --no-pager --no-graph -r "$revset_arg" -T 'description' | head -1)
+                echo "The revision already has a description: $desc_preview" >&2
+            else
+                echo "All $total_count revision(s) already have descriptions" >&2
+            fi
+            echo "" >&2
+            echo "To replace existing descriptions, use: $(basename "$0") --replace $revset_arg" >&2
             exit 1
         fi
     done
