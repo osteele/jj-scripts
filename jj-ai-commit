@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 # Source shared library
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,6 +39,16 @@ Options:
     --no-edit           Don't open editor (default)
     --reset-author      Reset the author to the configured user
     --author AUTHOR     Set a specific author for the revision
+
+    Global jj options (passed to all jj commands):
+    --ignore-immutable  Allow rewriting immutable revisions
+    --debug             Enable debug output (shows prompts and LLM calls)
+    --color WHEN        Colorize output (always, never, auto)
+    --quiet             Suppress non-error output
+    --no-pager          Disable pager
+    --config NAME=VALUE Set a config option (can be repeated)
+    --config-file PATH  Additional config file to read
+
     -h, --help          Show this help
 
 Examples:
@@ -61,8 +71,11 @@ EOF
 model=$(select_default_model)
 dry_run=false
 custom_prompt=""
+DEBUG=false
+QUIET=false
 
 # Arrays for organizing arguments
+declare -a jj_global_args=()
 declare -a filesets=()
 declare -a jj_commit_args=()
 
@@ -110,6 +123,48 @@ while [[ $# -gt 0 ]]; do
             jj_commit_args+=("--author" "$2")
             shift 2
             ;;
+        --ignore-immutable)
+            jj_global_args+=("--ignore-immutable")
+            shift
+            ;;
+        --debug)
+            jj_global_args+=("--debug")
+            DEBUG=true
+            shift
+            ;;
+        --color)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --color requires an argument" >&2
+                exit 1
+            fi
+            jj_global_args+=("--color" "$2")
+            shift 2
+            ;;
+        --quiet)
+            jj_global_args+=("--quiet")
+            QUIET=true
+            shift
+            ;;
+        --no-pager)
+            jj_global_args+=("--no-pager")
+            shift
+            ;;
+        --config)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --config requires an argument" >&2
+                exit 1
+            fi
+            jj_global_args+=("--config" "$2")
+            shift 2
+            ;;
+        --config-file)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --config-file requires an argument" >&2
+                exit 1
+            fi
+            jj_global_args+=("--config-file" "$2")
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -126,33 +181,49 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Check if we're in a jj repository
-if ! jj root >/dev/null 2>&1; then
+if ! jj "${jj_global_args[@]}" root >/dev/null 2>&1; then
     echo "Error: Not in a Jujutsu repository" >&2
     exit 1
 fi
 
 # Check if there are any changes and show a summary
-echo -e "\n== Changes to commit =="
+if [ "$QUIET" = false ]; then
+    echo -e "\n== Changes to commit =="
+fi
 if [ ${#filesets[@]} -gt 0 ]; then
-    echo "Files: ${filesets[*]}"
+    if [ "$QUIET" = false ]; then
+        echo "Files: ${filesets[*]}"
+    fi
     # Check if there are any changes in the specified files
-    if ! jj diff --no-pager --summary "${filesets[@]}" 2>/dev/null | grep -q '^'; then
+    if ! jj "${jj_global_args[@]}" diff --no-pager --summary "${filesets[@]}" 2>/dev/null | grep -q '^'; then
         echo "No changes to commit in specified files" >&2
         exit 0
     fi
 else
-    echo "All changes in working copy"
+    if [ "$QUIET" = false ]; then
+        echo "All changes in working copy"
+    fi
     # Check if there are any changes in the working copy
     # Check if jj diff produces any output
-    if ! jj diff --no-pager --stat 2>/dev/null | grep -q '^'; then
+    if ! jj "${jj_global_args[@]}" diff --no-pager --stat 2>/dev/null | grep -q '^'; then
         echo "No changes to commit" >&2
         exit 0
     fi
 fi
 
 # Load additional instructions from config files
-repo_root=$(jj root)
+repo_root=$(jj "${jj_global_args[@]}" root)
 additional_instructions=$(load_additional_instructions "$repo_root")
+
+if [ "$DEBUG" = true ]; then
+    echo "[DEBUG] Loaded instruction files:" >&2
+    if [ -n "$additional_instructions" ]; then
+        echo "$additional_instructions" | head -n 3 >&2
+        echo "..." >&2
+    else
+        echo "[DEBUG] No additional instructions found" >&2
+    fi
+fi
 
 # Combine additional instructions with custom prompt
 combined_prompt="$additional_instructions"
@@ -168,55 +239,80 @@ fi
 # Generate commit message with progress indicator
 model_display=$(resolve_model_display "$model")
 
-echo -e "\n== Generating Commit Message (via ${model_display}) =="
+if [ "$DEBUG" = true ]; then
+    echo "[DEBUG] Using model: $model_display" >&2
+fi
+
+if [ "$QUIET" = false ]; then
+    echo -e "\n== Generating Commit Message (via ${model_display}) =="
+fi
 echo -n "Generating commit message... " >&2
 
 # Get the diff and pipe it through the message generator
 # Note: jj-ai-commit doesn't have a current_desc, so pass empty string
 if [ ${#filesets[@]} -gt 0 ]; then
-    commit_msg=$(jj diff --no-pager --git "${filesets[@]}" | generate_commit_message "$model" "$combined_prompt" "")
+    diff_output=$(jj "${jj_global_args[@]}" diff --no-pager --git "${filesets[@]}")
 else
-    commit_msg=$(jj diff --no-pager --git | generate_commit_message "$model" "$combined_prompt" "")
+    diff_output=$(jj "${jj_global_args[@]}" diff --no-pager --git)
 fi
+
+if [ "$DEBUG" = true ]; then
+    echo "[DEBUG] Prompt:" >&2
+    echo "=== Diff ===" >&2
+    echo "$diff_output" | head -n 10 >&2
+    echo "..." >&2
+    echo "=== Instructions ===" >&2
+    echo "$combined_prompt" >&2
+fi
+
+commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "")
 
 printf "\r\033[K" >&2  # Clear progress message
 
 # Display the message
-echo "$commit_msg"
+if [ "$QUIET" = false ]; then
+    echo "$commit_msg"
+fi
 
 if [ "$dry_run" = true ]; then
-    echo -e "\n== Next Steps =="
-    if [ ${#filesets[@]} -gt 0 ]; then
-        echo "To commit these files with this message, run:"
-        echo "  jj commit ${filesets[*]} -m \"...\""
-    else
-        echo "To commit all changes with this message, run:"
-        echo "  jj commit -m \"...\""
+    if [ "$QUIET" = false ]; then
+        echo -e "\n== Next Steps =="
+        if [ ${#filesets[@]} -gt 0 ]; then
+            echo "To commit these files with this message, run:"
+            echo "  jj commit ${filesets[*]} -m \"...\""
+        else
+            echo "To commit all changes with this message, run:"
+            echo "  jj commit -m \"...\""
+        fi
     fi
 else
-    echo -e "\n== Creating commit ==" >&2
-    
+    if [ "$QUIET" = false ]; then
+        echo -e "\n== Creating commit ==" >&2
+    fi
+
     # Create the commit with the generated message
     # Build command with proper array handling
-    commit_cmd=(jj commit -m "$commit_msg")
-    
+    commit_cmd=(jj "${jj_global_args[@]}" commit -m "$commit_msg")
+
     # Add filesets if any
     if [ ${#filesets[@]} -gt 0 ]; then
         commit_cmd+=("${filesets[@]}")
     fi
-    
+
     # Add additional jj commit arguments if any
     if [ ${#jj_commit_args[@]} -gt 0 ]; then
         commit_cmd+=("${jj_commit_args[@]}")
     fi
-    
+
     # Execute the commit
     if "${commit_cmd[@]}"; then
-        echo "Commit created successfully!"
-        
-        # Show the new commit
-        echo -e "\n== New commit =="
-        jj log --no-pager -r @- -n 1
+        if [ "$QUIET" = false ]; then
+            echo "Commit created successfully!"
+
+            # Show the new commit
+            echo -e "\n== New commit =="
+            jj "${jj_global_args[@]}" log --no-pager -r @- -n 1
+        fi
     else
         echo "Error: Failed to create commit" >&2
         exit 1

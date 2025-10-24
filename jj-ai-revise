@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 # Source shared library
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +45,15 @@ Options:
     --reset-author          Reset the author to the configured user
     --author AUTHOR         Set a specific author for the revision
 
+    Global jj options (passed to all jj commands):
+    --ignore-immutable      Allow rewriting immutable revisions
+    --debug                 Enable debug output (shows prompts and LLM calls)
+    --color WHEN            Colorize output (always, never, auto)
+    --quiet                 Suppress non-error output
+    --no-pager              Disable pager
+    --config NAME=VALUE     Set a config option (can be repeated)
+    --config-file PATH      Additional config file to read
+
     -h, --help              Show this help
 
 Examples:
@@ -60,8 +69,11 @@ EOF
 model=$(select_default_model)
 dry_run=false
 revision_prompt=""
+DEBUG=false
+QUIET=false
 
 # Arrays for jj arguments and revsets
+declare -a jj_global_args=()
 declare -a jj_describe_args=()
 declare -a revset_args=()
 
@@ -113,6 +125,48 @@ while [[ $# -gt 0 ]]; do
             jj_describe_args+=("--author" "$2")
             shift 2
             ;;
+        --ignore-immutable)
+            jj_global_args+=("--ignore-immutable")
+            shift
+            ;;
+        --debug)
+            jj_global_args+=("--debug")
+            DEBUG=true
+            shift
+            ;;
+        --color)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --color requires an argument" >&2
+                exit 1
+            fi
+            jj_global_args+=("--color" "$2")
+            shift 2
+            ;;
+        --quiet)
+            jj_global_args+=("--quiet")
+            QUIET=true
+            shift
+            ;;
+        --no-pager)
+            jj_global_args+=("--no-pager")
+            shift
+            ;;
+        --config)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --config requires an argument" >&2
+                exit 1
+            fi
+            jj_global_args+=("--config" "$2")
+            shift 2
+            ;;
+        --config-file)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --config-file requires an argument" >&2
+                exit 1
+            fi
+            jj_global_args+=("--config-file" "$2")
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -140,7 +194,7 @@ if [ ${#revset_args[@]} -eq 0 ]; then
 fi
 
 # Check if we're in a jj repository
-if ! jj root >/dev/null 2>&1; then
+if ! jj "${jj_global_args[@]}" root >/dev/null 2>&1; then
     echo "Error: Not in a Jujutsu repository" >&2
     exit 1
 fi
@@ -151,7 +205,7 @@ all_revsets=$(IFS='|'; echo "${revset_args[*]}")
 revisions=()
 while IFS= read -r line; do
     [ -n "$line" ] && revisions+=("$line")
-done < <(jj log --no-graph --no-pager -r "$all_revsets" -T 'change_id.short() ++ "\n"')
+done < <(jj "${jj_global_args[@]}" log --no-graph --no-pager -r "$all_revsets" -T 'change_id.short() ++ "\n"')
 
 # Check that we got at least one revision
 if [ ${#revisions[@]} -eq 0 ]; then
@@ -162,7 +216,7 @@ fi
 # Filter to only non-empty descriptions
 filtered_revisions=()
 for revision in "${revisions[@]}"; do
-    has_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'if(description, "yes", "")')
+    has_desc=$(jj "${jj_global_args[@]}" log --no-pager --no-graph -r "$revision" -T 'if(description, "yes", "")')
     if [ -n "$has_desc" ]; then
         filtered_revisions+=("$revision")
     fi
@@ -180,10 +234,25 @@ fi
 echo "Processing ${#revisions[@]} revision(s) with descriptions"
 
 # Load additional instructions from config files (once for all revisions)
-repo_root=$(jj root)
+repo_root=$(jj "${jj_global_args[@]}" root)
 additional_instructions=$(load_additional_instructions "$repo_root")
 
+if [ "$DEBUG" = true ]; then
+    echo "[DEBUG] Loaded instruction files:" >&2
+    if [ -n "$additional_instructions" ]; then
+        echo "$additional_instructions" | head -n 3 >&2
+        echo "..." >&2
+    else
+        echo "[DEBUG] No additional instructions found" >&2
+    fi
+fi
+
 model_display=$(resolve_model_display "$model")
+
+if [ "$DEBUG" = true ]; then
+    echo "[DEBUG] Using model: $model_display" >&2
+    echo "[DEBUG] Revision prompt: $revision_prompt" >&2
+fi
 
 # Process revisions based on mode (dry-run vs apply)
 if [ "$dry_run" = true ]; then
@@ -192,10 +261,16 @@ if [ "$dry_run" = true ]; then
 
     for revision in "${revisions[@]}"; do
         # Get the current description
-        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+        current_desc=$(jj "${jj_global_args[@]}" log --no-pager --no-graph -r "$revision" -T 'description')
 
         # Generate revised message with progress indicator
         echo -n "Revising message for $revision... " >&2
+
+        if [ "$DEBUG" = true ]; then
+            echo "[DEBUG] Current description for $revision:" >&2
+            echo "$current_desc" | head -n 3 >&2
+            echo "..." >&2
+        fi
 
         # Generate revised description
         revised_msg=$(generate_revision_message "$model" "$revision_prompt" "$additional_instructions" "$current_desc")
@@ -214,41 +289,55 @@ if [ "$dry_run" = true ]; then
     done
 
     # Display all generated messages
-    for i in "${!revisions[@]}"; do
-        revision="${revisions[$i]}"
-        revised_msg="${generated_messages[$i]}"
+    if [ "$QUIET" = false ]; then
+        for i in "${!revisions[@]}"; do
+            revision="${revisions[$i]}"
+            revised_msg="${generated_messages[$i]}"
+
+            echo -e "\n=========================================="
+            echo "== Revision $revision =="
+
+            # Get and show current description
+            current_desc=$(jj "${jj_global_args[@]}" log --no-pager --no-graph -r "$revision" -T 'description')
+
+            echo -e "\n== Current Description =="
+            echo "$current_desc"
+
+            echo -e "\n== Revised Description (via ${model_display}) =="
+            echo "$revised_msg"
+        done
 
         echo -e "\n=========================================="
-        echo "== Revision $revision =="
-
-        # Get and show current description
-        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
-
-        echo -e "\n== Current Description =="
-        echo "$current_desc"
-
-        echo -e "\n== Revised Description (via ${model_display}) =="
-        echo "$revised_msg"
-    done
-
-    echo -e "\n=========================================="
-    echo "Dry-run complete. No descriptions were applied."
-    echo "Processed ${#revisions[@]} revision(s)."
+        echo "Dry-run complete. No descriptions were applied."
+        echo "Processed ${#revisions[@]} revision(s)."
+    fi
 else
     # Apply mode: generate and apply each revision sequentially
     for revision in "${revisions[@]}"; do
-        echo -e "\n=========================================="
-        echo "== Processing revision $revision =="
+        if [ "$QUIET" = false ]; then
+            echo -e "\n=========================================="
+            echo "== Processing revision $revision =="
+        fi
 
         # Get the current description
-        current_desc=$(jj log --no-pager --no-graph -r "$revision" -T 'description')
+        current_desc=$(jj "${jj_global_args[@]}" log --no-pager --no-graph -r "$revision" -T 'description')
 
         # Show current description
-        echo -e "\n== Current Description =="
-        echo "$current_desc"
+        if [ "$QUIET" = false ]; then
+            echo -e "\n== Current Description =="
+            echo "$current_desc"
+        fi
+
+        if [ "$DEBUG" = true ]; then
+            echo "[DEBUG] Current description for $revision:" >&2
+            echo "$current_desc" | head -n 3 >&2
+            echo "..." >&2
+        fi
 
         # Generate revised message with progress indicator
-        echo -e "\n== Generating Revised Description (via ${model_display}) =="
+        if [ "$QUIET" = false ]; then
+            echo -e "\n== Generating Revised Description (via ${model_display}) =="
+        fi
         echo -n "Revising commit message... " >&2
 
         # Generate revised description
@@ -264,14 +353,18 @@ else
         printf "\r\033[K" >&2  # Clear progress message
 
         # Display the revised message
-        echo "$revised_msg"
+        if [ "$QUIET" = false ]; then
+            echo "$revised_msg"
+        fi
 
         # Apply the new description to the revision
-        echo -e "\n== Applying revised description ==" >&2
+        if [ "$QUIET" = false ]; then
+            echo -e "\n== Applying revised description ==" >&2
+        fi
         if [ ${#jj_describe_args[@]} -gt 0 ]; then
-            jj describe -r "$revision" -m "$revised_msg" "${jj_describe_args[@]}"
+            jj "${jj_global_args[@]}" describe -r "$revision" -m "$revised_msg" "${jj_describe_args[@]}"
         else
-            jj describe -r "$revision" -m "$revised_msg"
+            jj "${jj_global_args[@]}" describe -r "$revision" -m "$revised_msg"
         fi
 
         # Check if application succeeded
@@ -280,9 +373,13 @@ else
             exit 1
         fi
 
-        echo "✓ Description revised successfully"
+        if [ "$QUIET" = false ]; then
+            echo "✓ Description revised successfully"
+        fi
     done
 
-    echo -e "\n=========================================="
-    echo "Successfully processed ${#revisions[@]} revision(s)."
+    if [ "$QUIET" = false ]; then
+        echo -e "\n=========================================="
+        echo "Successfully processed ${#revisions[@]} revision(s)."
+    fi
 fi
