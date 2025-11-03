@@ -28,7 +28,10 @@ is generated for each revision based on its changes.
 By default, only revisions with empty descriptions are processed.
 Use --replace to process all revisions regardless of their current description.
 
-If no revsets are specified, uses the current working copy (@).
+Default revision selection (when no revsets specified):
+  1. Use @ if it has no description and has changes
+  2. Use @- if @ doesn't qualify and @- has no description and has changes
+  3. Otherwise, exit with error suggesting --all flag
 
 Options:
     -m, --model MODEL       Specify the LLM model to use (default: auto-select)
@@ -36,6 +39,8 @@ Options:
     -n, --dry-run           Show the messages without applying them
     -p, --prompt PROMPT     Provide additional instructions for the message
     --replace               Process all revisions, replacing existing descriptions
+    --all                   Select all revisions with empty descriptions and changes
+                            (uses revset: description(exact:"") & ~empty())
     -l, --list              List available models
 
     Diff options (passed to jj diff):
@@ -61,7 +66,8 @@ Options:
     -h, --help              Show this help
 
 Examples:
-    $(basename "$0")                    # Describe @ (if empty)
+    $(basename "$0")                    # Smart default: @ or @- (see above)
+    $(basename "$0") --all              # Describe all revisions with empty descriptions
     $(basename "$0") abc123             # Describe single revision (if empty)
     $(basename "$0") @- @               # Describe two revisions (only if empty)
     $(basename "$0") "main..@"          # Describe revisions from main to @ (only empty ones)
@@ -77,6 +83,7 @@ model=$(select_default_model)
 dry_run=false
 custom_prompt=""
 replace_mode=false
+use_all_mode=false
 DEBUG=false
 QUIET=false
 
@@ -116,6 +123,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --replace)
             replace_mode=true
+            shift
+            ;;
+        --all)
+            use_all_mode=true
             shift
             ;;
         -f|--from)
@@ -219,9 +230,36 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Default to @ if no revsets specified
+# Default revset selection if no revsets specified
 if [ ${#revset_args[@]} -eq 0 ]; then
-    revset_args=("@")
+    if [ "$use_all_mode" = true ]; then
+        # Use --all mode: select all revisions with empty descriptions and changes
+        revset_args=('description(exact:"") & ~empty()')
+    else
+        # Smart default: check @ first, then @-, then error
+        # Check if @ has no description and has changes
+        at_has_desc=$(jj "${jj_global_args[@]}" log --no-pager --no-graph -r @ -T 'if(description, "yes", "")')
+        at_diff=$(jj "${jj_global_args[@]}" diff --no-pager -r @ --git 2>/dev/null || true)
+
+        if [ -z "$at_has_desc" ] && [ -n "$at_diff" ]; then
+            # @ has no description but has changes - use it
+            revset_args=("@")
+        else
+            # Check if @- has no description and has changes
+            at_minus_has_desc=$(jj "${jj_global_args[@]}" log --no-pager --no-graph -r @- -T 'if(description, "yes", "")' 2>/dev/null || echo "yes")
+            at_minus_diff=$(jj "${jj_global_args[@]}" diff --no-pager -r @- --git 2>/dev/null || true)
+
+            if [ -z "$at_minus_has_desc" ] && [ -n "$at_minus_diff" ]; then
+                # @- has no description but has changes - use it
+                revset_args=("@-")
+            else
+                # Neither @ nor @- need descriptions
+                echo "Error: Neither @ nor @- need descriptions." >&2
+                echo "Use --all to describe all revisions without descriptions." >&2
+                exit 1
+            fi
+        fi
+    fi
 fi
 
 # Check if we're in a jj repository
@@ -240,8 +278,13 @@ done < <(jj "${jj_global_args[@]}" log --no-graph --no-pager -r "$all_revsets" -
 
 # Check that we got at least one revision
 if [ ${#revisions[@]} -eq 0 ]; then
-    echo "Error: No revisions matched the provided revsets" >&2
-    exit 1
+    if [ "$use_all_mode" = true ]; then
+        # Silent success for --all mode when no revisions need descriptions
+        exit 0
+    else
+        echo "Error: No revisions matched the provided revsets" >&2
+        exit 1
+    fi
 fi
 
 # Filter to only empty descriptions unless --replace is specified
