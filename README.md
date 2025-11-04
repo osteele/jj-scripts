@@ -142,7 +142,7 @@ jj-file-delete -n -r "pk::" "*.log" "*.aux" "build/**"
 jj-file-delete -r "@- | @" temp.txt
 ```
 
-The script processes revisions in topological order and skips any revisions where the file patterns don't match. Descendant revisions are automatically rebased as needed.
+The script processes revisions in topological order and skips any revisions where the file patterns don't match. Descendant revisions are automatically updated by Jujutsu when their ancestors are modified (this happens implicitly as part of Jujutsu's design, not through explicit rebase commands).
 
 ## AI-Assisted Jujutsu Tools
 

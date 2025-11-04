@@ -279,7 +279,10 @@ done < <(jj "${jj_global_args[@]}" log --no-graph --no-pager -r "$all_revsets" -
 # Check that we got at least one revision
 if [ ${#revisions[@]} -eq 0 ]; then
     if [ "$use_all_mode" = true ]; then
-        # Silent success for --all mode when no revisions need descriptions
+        # Success for --all mode when no revisions need descriptions
+        if [ "$QUIET" = false ]; then
+            echo "No revisions need descriptions"
+        fi
         exit 0
     else
         echo "Error: No revisions matched the provided revsets" >&2

@@ -189,13 +189,22 @@ for revision in "${revisions[@]}"; do
             exit 1
         fi
 
-        # Remove matching files (jj will auto-commit the changes)
+        # Remove matching files
         while IFS= read -r file; do
             if [ -e "$file" ]; then
                 rm -f "$file"
                 echo "  Removed: $file"
             fi
         done <<< "$matching_files"
+
+        # Explicitly snapshot the changes to ensure they're captured
+        # This makes the script robust against user settings for automatic snapshotting
+        # Descendant revisions will be automatically updated by Jujutsu when we switch away
+        if ! jj describe -m "" >/dev/null 2>&1; then
+            echo "Error: Failed to snapshot changes for revision $revision" >&2
+            error_occurred=true
+            exit 1
+        fi
 
         total_files_removed=$((total_files_removed + file_count))
         revisions_modified=$((revisions_modified + 1))
