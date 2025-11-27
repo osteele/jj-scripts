@@ -34,6 +34,7 @@ Default revision selection (when no revsets specified):
   3. Otherwise, exit with error suggesting --all flag
 
 Options:
+    -r, --revision REVSET   Specify which revision(s) to describe
     -m, --model MODEL       Specify the LLM model to use (default: auto-select)
                             Examples: gpt-4, claude-3-opus, mistral-7b, ...
     -n, --dry-run           Show the messages without applying them
@@ -46,7 +47,6 @@ Options:
     Diff options (passed to jj diff):
     -f, --from REVSET       Starting revset for diff
     -t, --to REVSET         Ending revset for diff
-    -r, --revisions REVSET  Revisions to diff (alternative to --from/--to)
 
     Description options:
     --edit                  Open editor after generating the message
@@ -68,12 +68,14 @@ Options:
 Examples:
     $(basename "$0")                    # Smart default: @ or @- (see above)
     $(basename "$0") --all              # Describe all revisions with empty descriptions
+    $(basename "$0") -r @               # Describe @ (if empty)
+    $(basename "$0") -r @ --replace     # Replace @'s description even if non-empty
     $(basename "$0") abc123             # Describe single revision (if empty)
     $(basename "$0") @- @               # Describe two revisions (only if empty)
     $(basename "$0") "main..@"          # Describe revisions from main to @ (only empty ones)
     $(basename "$0") --replace "main..@" # Replace all descriptions, even non-empty
-    $(basename "$0") -n @ "fork..@-"    # Dry-run for @ and fork..@- range (only empty)
-    $(basename "$0") @ --from main      # Describe @ using diff from main (if empty)
+    $(basename "$0") -n -r @ "fork..@-" # Dry-run for @ and fork..@- range (only empty)
+    $(basename "$0") -r @ --from main   # Describe @ using diff from main (if empty)
 EOF
     exit 1
 }
@@ -145,12 +147,13 @@ while [[ $# -gt 0 ]]; do
             jj_diff_args+=("--to" "$2")
             shift 2
             ;;
-        -r|--revisions)
+        -r|--revision|--revisions)
             if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
-                echo "Error: --revisions requires an argument" >&2
+                echo "Error: -r/--revision requires an argument" >&2
                 exit 1
             fi
-            jj_diff_args+=("--revisions" "$2")
+            # -r is for specifying which revision(s) to describe, not a diff option
+            revset_args+=("$2")
             shift 2
             ;;
         --edit)

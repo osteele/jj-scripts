@@ -203,9 +203,9 @@ else
     if [ "$QUIET" = false ]; then
         echo "All changes in working copy"
     fi
-    # Check if there are any changes in the working copy
-    # Check if jj diff produces any output
-    if ! jj "${jj_global_args[@]}" diff --no-pager --stat 2>/dev/null | grep -q '^'; then
+    # Check if there are any changes in the working copy revision
+    # Use -r @ to check changes IN the revision, not uncommitted filesystem changes
+    if ! jj "${jj_global_args[@]}" diff --no-pager --stat -r @ 2>/dev/null | grep -q '^'; then
         echo "No changes to commit" >&2
         exit 0
     fi
@@ -253,7 +253,7 @@ echo -n "Generating commit message... " >&2
 if [ ${#filesets[@]} -gt 0 ]; then
     diff_output=$(jj "${jj_global_args[@]}" diff --no-pager --git "${filesets[@]}")
 else
-    diff_output=$(jj "${jj_global_args[@]}" diff --no-pager --git)
+    diff_output=$(jj "${jj_global_args[@]}" diff --no-pager --git -r @)
 fi
 
 if [ "$DEBUG" = true ]; then
