@@ -195,7 +195,9 @@ if [ ${#filesets[@]} -gt 0 ]; then
         echo "Files: ${filesets[*]}"
     fi
     # Check if there are any changes in the specified files
-    if ! jj "${jj_global_args[@]}" diff --no-pager --summary "${filesets[@]}" 2>/dev/null | grep -q '^'; then
+    # Note: Use variable instead of pipe to avoid pipefail interaction with jj exit code
+    diff_check=$(jj "${jj_global_args[@]}" diff --no-pager --summary "${filesets[@]}" 2>/dev/null || true)
+    if [ -z "$diff_check" ]; then
         echo "No changes to commit in specified files" >&2
         exit 0
     fi
@@ -205,7 +207,9 @@ else
     fi
     # Check if there are any changes in the working copy revision
     # Use -r @ to check changes IN the revision, not uncommitted filesystem changes
-    if ! jj "${jj_global_args[@]}" diff --no-pager --stat -r @ 2>/dev/null | grep -q '^'; then
+    # Note: Use variable instead of pipe to avoid pipefail interaction with jj exit code
+    diff_check=$(jj "${jj_global_args[@]}" diff --no-pager --stat -r @ 2>/dev/null || true)
+    if [ -z "$diff_check" ]; then
         echo "No changes to commit" >&2
         exit 0
     fi
