@@ -1,0 +1,364 @@
+#!/bin/bash
+set -euo pipefail
+
+script_name=$(basename "$0")
+
+# Default values
+revset=""
+from_revision=""
+dry_run=false
+source_path=""
+dest_path=""
+
+# Check for jj installation
+if ! command -v jj >/dev/null 2>&1; then
+    echo "Error: jj command not found. Install from https://github.com/martinvonz/jj" >&2
+    exit 1
+fi
+
+usage() {
+    cat << EOF
+Usage: $script_name [options] <source> <destination>
+
+Recursively move a tracked file or directory across each revision in a revset.
+The script rewrites every matching revision so that <source> appears at
+<destination> instead. Paths must be relative to the repository root.
+
+Arguments:
+    <source>                File or directory to move
+    <destination>           New path for the file or directory
+
+Options:
+    -r, --revisions REVSET  Revset to rewrite. If omitted, the tool scans history to
+                            find the earliest ancestor containing <source> and rewrites
+                            through the current working copy.
+        --from REVISION     Start rewriting from REVISION through the working copy.
+                            Mutually exclusive with --revisions.
+    -n, --dry-run           Show what would be moved without doing it
+    -h, --help              Show this help
+
+Examples:
+    # Rename a file everywhere after main branched
+    $script_name -r "main..@" README.md docs/README.md
+
+    # Move a directory history into another path
+    $script_name src/legacy src/archive/legacy
+
+    # Start rewriting from a bookmark
+    $script_name --from release src/config.json config/config.json
+
+    # Preview changes
+    $script_name -n assets/images public/images
+EOF
+    exit 1
+}
+
+contains_glob() {
+    [[ "$1" == *'*'* || "$1" == *'?'* || "$1" == *'['* ]]
+}
+
+normalize_path() {
+    local path="$1"
+    while [[ "$path" == ./* ]]; do
+        path="${path#./}"
+    done
+    path="${path%/}"
+    echo "$path"
+}
+
+find_earliest_revision_for_paths() {
+    local paths=("$@")
+    local log_output
+
+    if ! log_output=$(jj log --ignore-working-copy --no-graph --no-pager -r 'ancestors(@)' -T 'change_id.short() ++ "\n"' -- "${paths[@]}"); then
+        echo "Error: Failed to inspect revision history for the provided paths" >&2
+        exit 1
+    fi
+
+    local earliest
+    earliest=$(printf '%s\n' "$log_output" | awk 'NF { rev=$0 } END { if (rev != "") print rev }')
+
+    if [ -z "$earliest" ]; then
+        echo "Error: Could not find any ancestors containing the specified files" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$earliest"
+}
+
+file_matches_source() {
+    local file="$1"
+    if [ "$file" = "$source_path" ]; then
+        return 0
+    fi
+
+    local prefix="$source_path/"
+    local prefix_len=${#prefix}
+
+    if [ "$prefix_len" -gt 1 ] && [ "${file:0:prefix_len}" = "$prefix" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+compute_target_path() {
+    local file="$1"
+
+    if [ "$file" = "$source_path" ]; then
+        printf '%s\n' "$dest_path"
+        return
+    fi
+
+    local prefix_len=$(( ${#source_path} + 1 ))
+    local suffix="${file:prefix_len}"
+
+    if [ -z "$suffix" ]; then
+        printf '%s\n' "$dest_path"
+    else
+        printf '%s/%s\n' "$dest_path" "$suffix"
+    fi
+}
+
+get_matching_files() {
+    local revision="$1"
+
+    local all_files
+    all_files=$(jj file list --ignore-working-copy -r "$revision" 2>/dev/null || true)
+
+    if [ -z "$all_files" ]; then
+        return 0
+    fi
+
+    local matched_files=()
+    while IFS= read -r file; do
+        if file_matches_source "$file"; then
+            matched_files+=("$file")
+        fi
+    done <<< "$all_files"
+
+    if [ ${#matched_files[@]} -gt 0 ]; then
+        printf '%s\n' "${matched_files[@]}"
+    fi
+}
+
+sort_paths_descending() {
+    python3 - <<'PY'
+import sys
+paths=[line.rstrip('\n') for line in sys.stdin if line.rstrip('\n')]
+paths.sort(key=lambda p: (-len(p), p))
+for p in paths:
+    print(p)
+PY
+}
+
+# Parse arguments
+positional=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -r|--revisions)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --revisions requires an argument" >&2
+                exit 1
+            fi
+            revset="$2"
+            shift 2
+            ;;
+        --from)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --from requires an argument" >&2
+                exit 1
+            fi
+            from_revision="$2"
+            shift 2
+            ;;
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+            positional+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ ${#positional[@]} -ne 2 ]; then
+    echo "Error: <source> and <destination> are required" >&2
+    usage
+fi
+
+if [[ -n "$revset" && -n "$from_revision" ]]; then
+    echo "Error: --revisions and --from cannot be used together" >&2
+    exit 1
+fi
+
+source_path=$(normalize_path "${positional[0]}")
+dest_path=$(normalize_path "${positional[1]}")
+
+if [ -z "$source_path" ] || [ -z "$dest_path" ]; then
+    echo "Error: Source and destination paths must be non-empty and relative" >&2
+    exit 1
+fi
+
+if [ "$source_path" = "." ] || [ "$dest_path" = "." ]; then
+    echo "Error: '.' is not a valid source or destination path" >&2
+    exit 1
+fi
+
+if contains_glob "$source_path" || contains_glob "$dest_path"; then
+    echo "Error: Glob patterns are not supported for move operations; provide literal paths" >&2
+    exit 1
+fi
+
+if [ "$source_path" = "$dest_path" ]; then
+    echo "Error: Source and destination paths must differ" >&2
+    exit 1
+fi
+
+source_prefix="$source_path/"
+if [ "${dest_path:0:${#source_prefix}}" = "$source_prefix" ]; then
+    echo "Error: Destination cannot be inside the source path" >&2
+    exit 1
+fi
+
+# Check if we're in a jj repository
+if ! jj root >/dev/null 2>&1; then
+    echo "Error: Not in a Jujutsu repository" >&2
+    exit 1
+fi
+
+if [ -z "$revset" ]; then
+    if [ -n "$from_revision" ]; then
+        revset="${from_revision}::@"
+    else
+        mapfile -t working_copy_matches < <(get_matching_files "@" || true)
+
+        if [ ${#working_copy_matches[@]} -eq 0 ]; then
+            echo "Error: Could not infer revision range because no tracked files in the working copy match the source path. Specify --revisions or --from to override." >&2
+            exit 1
+        fi
+
+        earliest_revision=$(find_earliest_revision_for_paths "${working_copy_matches[@]}")
+        revset="${earliest_revision}::@"
+        echo "Auto-selected revision range: $revset"
+    fi
+fi
+
+# Expand revset to individual revisions
+revisions=()
+while IFS= read -r line; do
+    [ -n "$line" ] && revisions+=("$line")
+done < <(jj log --ignore-working-copy --no-graph --no-pager -r "$revset" -T 'change_id.short() ++ "\n"')
+
+if [ ${#revisions[@]} -eq 0 ]; then
+    echo "Error: No revisions matched the provided revset" >&2
+    exit 1
+fi
+
+echo "Processing ${#revisions[@]} revision(s)..."
+
+original_revision=$(jj log --ignore-working-copy -r @ --no-graph --no-pager -T 'change_id.short()')
+error_occurred=false
+
+cleanup() {
+    if [ "$error_occurred" = true ]; then
+        echo "Error occurred. Restoring working copy..." >&2
+        jj edit "$original_revision" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+
+total_files_moved=0
+revisions_modified=0
+
+for revision in "${revisions[@]}"; do
+    mapfile -t matching_files < <(get_matching_files "$revision" || true)
+
+    if [ ${#matching_files[@]} -eq 0 ]; then
+        continue
+    fi
+
+    file_count=${#matching_files[@]}
+
+    if [ "$dry_run" = true ]; then
+        echo ""
+        echo "Revision: $revision"
+        for file in "${matching_files[@]}"; do
+            target=$(compute_target_path "$file")
+            echo "  Would move: $file -> $target"
+        done
+        total_files_moved=$((total_files_moved + file_count))
+        revisions_modified=$((revisions_modified + 1))
+        continue
+    fi
+
+    echo ""
+    echo "Revision: $revision"
+
+    sorted_output=$(printf '%s\n' "${matching_files[@]}" | sort_paths_descending)
+    mapfile -t sorted_files <<< "$sorted_output"
+
+    if ! jj edit "$revision" >/dev/null 2>&1; then
+        echo "Error: Failed to edit revision $revision" >&2
+        error_occurred=true
+        exit 1
+    fi
+
+    for file in "${sorted_files[@]}"; do
+        target=$(compute_target_path "$file")
+
+        if [ "$file" = "$target" ]; then
+            continue
+        fi
+
+        if [ -e "$target" ]; then
+            echo "Error: Target path '$target' already exists in revision $revision" >&2
+            error_occurred=true
+            exit 1
+        fi
+
+        target_dir=$(dirname "$target")
+        if [ "$target_dir" != "." ]; then
+            mkdir -p "$target_dir"
+        fi
+
+        if ! mv "$file" "$target"; then
+            echo "Error: Failed to move $file -> $target in revision $revision" >&2
+            error_occurred=true
+            exit 1
+        fi
+        echo "  Moved: $file -> $target"
+    done
+
+    if ! jj describe -m "" >/dev/null 2>&1; then
+        echo "Error: Failed to snapshot changes for revision $revision" >&2
+        error_occurred=true
+        exit 1
+    fi
+
+    total_files_moved=$((total_files_moved + file_count))
+    revisions_modified=$((revisions_modified + 1))
+done
+
+if [ "$dry_run" = false ]; then
+    echo ""
+    echo "Restoring working copy..."
+    jj edit "$original_revision" >/dev/null 2>&1 || true
+fi
+
+echo ""
+echo "=========================================="
+if [ "$dry_run" = true ]; then
+    echo "Dry-run complete."
+    echo "Would move $total_files_moved file(s) across $revisions_modified revision(s)."
+else
+    echo "Successfully moved $total_files_moved file(s) across $revisions_modified revision(s)."
+fi

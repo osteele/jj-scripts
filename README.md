@@ -29,31 +29,6 @@ For project-specific aliases, add them to `.jj/repo/config.toml` instead.
 
 ## Jujutsu Tools
 
-### `jj-squash-safe`
-A smart squashing tool that finds the earliest ancestor where a commit can be safely squashed without creating merge conflicts. Unlike `jj squash`, this automatically determines the optimal target commit.
-
-```bash
-# Safe-squash current working copy into earliest conflict-free ancestor
-jj-squash-safe
-
-# Safe-squash a specific revision
-jj-squash-safe abc123
-
-# Preview what would happen without making changes
-jj-squash-safe --dry-run
-
-# Show detailed progress information
-jj-squash-safe --verbose
-
-# Combine options
-jj-squash-safe --dry-run --verbose @
-```
-
-The script walks up the ancestor chain from the specified commit, testing each ancestor to determine if squashing would be safe. It stops when it encounters:
-- Merge commits (multiple parents)
-- The root of the repository
-- Any ancestor where conflicts would occur
-
 ### `jj-export-bookmarks-as-tags`
 Export Jujutsu bookmarks as git tags in the local repository. This command is analogous to `jj git export` but specifically for converting bookmarks to tags. Existing tags with the same name will be overwritten.
 
@@ -125,24 +100,44 @@ jj-file-untrack-ignored
 jj-file-untrack-ignored --dry-run
 ```
 
-### `jj-file-delete`
-Remove files matching glob patterns from all revisions in a revset. Useful for removing accidentally committed files, build artifacts, or sensitive data from multiple revisions at once.
+### `jj-file-deep-rm`
+Remove files or entire tracked directories from every revision in a revset. By default, the script scans history to find the earliest ancestor that touched the provided files and then rewrites through the current working copy. Use `-r/--revisions` to override the inferred range, or `--from` to start rewriting from a specific ancestor. (`--from` and `--revisions` are mutually exclusive.)
 
 ```bash
 # Remove a specific file from all revisions in pk::
-jj-file-delete -r "pk::" parallel-differential-coding-slepian-wolf-analysis.md
+jj-file-deep-rm -r "pk::" parallel-differential-coding-slepian-wolf-analysis.md
 
 # Remove all .md files from revisions
-jj-file-delete -r "main..@" "*.md"
+jj-file-deep-rm -r "main..@" "*.md"
 
-# Remove multiple patterns with dry-run
-jj-file-delete -n -r "pk::" "*.log" "*.aux" "build/**"
+# Remove entire directories with dry-run
+jj-file-deep-rm -n assets/images docs/reference
 
-# Remove files from specific revisions
-jj-file-delete -r "@- | @" temp.txt
+# Start from a known ancestor and rewrite through the working copy
+jj-file-deep-rm --from main secrets.txt
+
+# Let the tool determine the revision range automatically
+jj-file-deep-rm secrets.txt
 ```
 
-The script processes revisions in topological order and skips any revisions where the file patterns don't match. Descendant revisions are automatically updated by Jujutsu when their ancestors are modified (this happens implicitly as part of Jujutsu's design, not through explicit rebase commands).
+### `jj-file-deep-mv`
+Rewrite history by moving a tracked file or directory (and its contents) to a new location across a revset. The command rewrites each matching revision so the file appears at the new path. Use `-r/--revisions` to explicitly select revisions, `--from` to start at a known ancestor, or omit both to auto-detect the earliest matching ancestor.
+
+```bash
+# Move a directory history into a new path
+jj-file-deep-mv docs/reference docs/archive/reference
+
+# Rename a file across history within a specific revset
+jj-file-deep-mv -r "main..@" README.md docs/README.md
+
+# Start rewriting from a bookmark
+jj-file-deep-mv --from release src/config.json config/config.json
+
+# Preview without editing history
+jj-file-deep-mv -n src/legacy analytics/legacy
+```
+
+Both scripts skip revisions that do not contain matching files, and descendant revisions are automatically updated by Jujutsu when their ancestors are modified (this happens implicitly as part of Jujutsu's design, not through explicit rebase commands).
 
 ## AI-Assisted Jujutsu Tools
 

@@ -1,0 +1,337 @@
+#!/bin/bash
+set -euo pipefail
+
+script_name=$(basename "$0")
+
+declare -a file_patterns=()
+declare -a literal_patterns=()
+declare -a glob_patterns=()
+
+# Check for jj installation
+if ! command -v jj >/dev/null 2>&1; then
+    echo "Error: jj command not found. Install from https://github.com/martinvonz/jj" >&2
+    exit 1
+fi
+
+usage() {
+    cat << EOF
+Usage: $script_name [options] <filepatterns>...
+
+Recursively remove the matched files or directories from each revision in a revset.
+Patterns support globbing (e.g. *.md, src/**/*.py). Directory arguments remove
+all tracked files stored under that directory path.
+
+Arguments:
+    <filepatterns>...       File or directory patterns to remove (supports globs)
+
+Options:
+    -r, --revisions REVSET  Revset to rewrite. If omitted, the tool scans history to
+                            find the earliest ancestor touching the matched files and
+                            rewrites through the current working copy.
+        --from REVISION     Start rewriting from REVISION through the working copy.
+                            Mutually exclusive with --revisions.
+    -n, --dry-run           Show what would be removed without doing it
+    -h, --help              Show this help
+
+Examples:
+    # Remove specific file from all revisions in pk::
+    $script_name -r "pk::" parallel-differential-coding-slepian-wolf-analysis.md
+
+    # Remove all .md files from revisions
+    $script_name -r "main..@" "*.md"
+
+    # Remove entire directory history with dry-run
+    $script_name -n assets/images
+
+    # Remove history beginning at a known ancestor
+    $script_name --from main secrets.txt
+
+    # Remove files from specific revisions
+    $script_name -r "@- | @" temp.txt
+EOF
+    exit 1
+}
+
+pattern_has_glob() {
+    [[ "$1" == *'*'* || "$1" == *'?'* || "$1" == *'['* ]]
+}
+
+literal_pattern_matches() {
+    local path="$1"
+    local pattern="$2"
+
+    local normalized="${pattern%/}"
+    [[ -n "$normalized" ]] || normalized="$pattern"
+
+    if [[ "$path" == "$normalized" ]]; then
+        return 0
+    fi
+
+    if [[ -n "$normalized" ]] && [[ "$path" == "$normalized"/* ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+path_matches_any_pattern() {
+    local path="$1"
+
+    for pattern in "${literal_patterns[@]}"; do
+        if literal_pattern_matches "$path" "$pattern"; then
+            return 0
+        fi
+    done
+
+    if [ ${#glob_patterns[@]} -gt 0 ]; then
+        if bash -c '
+                path=$1
+                shift
+                for pat in "$@"; do
+                    if [[ $path == $pat ]]; then
+                        exit 0
+                    fi
+                done
+                exit 1
+            ' _ "$path" "${glob_patterns[@]}"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+find_earliest_revision_for_paths() {
+    local paths=("$@")
+    local log_output
+
+    if ! log_output=$(jj log --ignore-working-copy --no-graph --no-pager -r 'ancestors(@)' -T 'change_id.short() ++ "\n"' -- "${paths[@]}"); then
+        echo "Error: Failed to inspect revision history for the provided paths" >&2
+        exit 1
+    fi
+
+    local earliest
+    earliest=$(printf '%s\n' "$log_output" | awk 'NF { rev=$0 } END { if (rev != "") print rev }')
+
+    if [ -z "$earliest" ]; then
+        echo "Error: Could not find any ancestors containing the specified files" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$earliest"
+}
+
+# Default values
+revset=""
+dry_run=false
+from_revision=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -r|--revisions)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --revisions requires an argument" >&2
+                exit 1
+            fi
+            revset="$2"
+            shift 2
+            ;;
+        --from)
+            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                echo "Error: --from requires an argument" >&2
+                exit 1
+            fi
+            from_revision="$2"
+            shift 2
+            ;;
+        -n|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+            # Positional argument (file pattern)
+            file_patterns+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Validate arguments
+if [ ${#file_patterns[@]} -eq 0 ]; then
+    echo "Error: At least one file pattern is required" >&2
+    usage
+fi
+
+if [[ -n "$revset" && -n "$from_revision" ]]; then
+    echo "Error: --revisions and --from cannot be used together" >&2
+    exit 1
+fi
+
+for pattern in "${file_patterns[@]}"; do
+    if pattern_has_glob "$pattern"; then
+        glob_patterns+=("$pattern")
+    else
+        literal_patterns+=("$pattern")
+    fi
+done
+
+# Check if we're in a jj repository
+if ! jj root >/dev/null 2>&1; then
+    echo "Error: Not in a Jujutsu repository" >&2
+    exit 1
+fi
+
+# Function to get files matching patterns in a specific revision
+get_matching_files() {
+    local revision="$1"
+
+    local all_files
+    all_files=$(jj file list --ignore-working-copy -r "$revision" 2>/dev/null || true)
+
+    if [ -z "$all_files" ]; then
+        return 0
+    fi
+
+    local matched_files=()
+    while IFS= read -r file; do
+        if path_matches_any_pattern "$file"; then
+            matched_files+=("$file")
+        fi
+    done <<< "$all_files"
+
+    if [ ${#matched_files[@]} -gt 0 ]; then
+        printf '%s\n' "${matched_files[@]}"
+    fi
+}
+
+if [ -z "$revset" ]; then
+    if [ -n "$from_revision" ]; then
+        revset="${from_revision}::@"
+    else
+        mapfile -t working_copy_matches < <(get_matching_files "@")
+
+        if [ ${#working_copy_matches[@]} -eq 0 ]; then
+            echo "Error: Could not infer revision range because no tracked files in the working copy match the provided patterns. Specify --revisions or --from to override." >&2
+            exit 1
+        fi
+
+        earliest_revision=$(find_earliest_revision_for_paths "${working_copy_matches[@]}")
+        revset="${earliest_revision}::@"
+        echo "Auto-selected revision range: $revset"
+    fi
+fi
+
+# Expand revset to individual revisions
+revisions=()
+while IFS= read -r line; do
+    [ -n "$line" ] && revisions+=("$line")
+done < <(jj log --ignore-working-copy --no-graph --no-pager -r "$revset" -T 'change_id.short() ++ "\n"')
+
+# Check that we got at least one revision
+if [ ${#revisions[@]} -eq 0 ]; then
+    echo "Error: No revisions matched the provided revset" >&2
+    exit 1
+fi
+
+echo "Processing ${#revisions[@]} revision(s)..."
+
+# Save current working copy revision
+original_revision=$(jj log --ignore-working-copy -r @ --no-graph --no-pager -T 'change_id.short()')
+
+# Track if any errors occurred
+error_occurred=false
+
+# Trap to restore working copy on exit
+cleanup() {
+    if [ "$error_occurred" = true ]; then
+        echo "Error occurred. Restoring working copy..." >&2
+        jj edit "$original_revision" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+
+# Process each revision
+total_files_removed=0
+revisions_modified=0
+
+for revision in "${revisions[@]}"; do
+    # Get files matching patterns in this revision
+    matching_files=$(get_matching_files "$revision")
+
+    if [ -z "$matching_files" ]; then
+        # No files match in this revision, skip silently
+        continue
+    fi
+
+    file_count=$(echo "$matching_files" | wc -l | tr -d ' ')
+
+    if [ "$dry_run" = true ]; then
+        # Dry-run mode: just show what would be removed
+        echo ""
+        echo "Revision: $revision"
+        while IFS= read -r file; do
+            echo "  Would remove: $file"
+        done <<< "$matching_files"
+        total_files_removed=$((total_files_removed + file_count))
+        revisions_modified=$((revisions_modified + 1))
+    else
+        # Apply mode: actually remove the files
+        echo ""
+        echo "Revision: $revision"
+
+        # Edit the revision directly
+        if ! jj edit "$revision" >/dev/null 2>&1; then
+            echo "Error: Failed to edit revision $revision" >&2
+            error_occurred=true
+            exit 1
+        fi
+
+        # Remove matching files
+        while IFS= read -r file; do
+            if [ -e "$file" ]; then
+                rm -f "$file"
+                echo "  Removed: $file"
+            fi
+        done <<< "$matching_files"
+
+        # Explicitly snapshot the changes to ensure they're captured
+        # This makes the script robust against user settings for automatic snapshotting
+        # Descendant revisions will be automatically updated by Jujutsu when we switch away
+        if ! jj describe -m "" >/dev/null 2>&1; then
+            echo "Error: Failed to snapshot changes for revision $revision" >&2
+            error_occurred=true
+            exit 1
+        fi
+
+        total_files_removed=$((total_files_removed + file_count))
+        revisions_modified=$((revisions_modified + 1))
+    fi
+done
+
+# Restore original working copy
+# Note: We try to edit back to the original revision, but if it was modified,
+# we may end up elsewhere. This is expected behavior.
+if [ "$dry_run" = false ]; then
+    echo ""
+    echo "Restoring working copy..."
+    # Try to edit to original revision, but don't fail if it's been modified
+    jj edit "$original_revision" >/dev/null 2>&1 || true
+fi
+
+# Summary
+echo ""
+echo "=========================================="
+if [ "$dry_run" = true ]; then
+    echo "Dry-run complete."
+    echo "Would remove $total_files_removed file(s) from $revisions_modified revision(s)."
+else
+    echo "Successfully removed $total_files_removed file(s) from $revisions_modified revision(s)."
+fi
