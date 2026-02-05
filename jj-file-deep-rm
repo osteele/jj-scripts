@@ -31,6 +31,7 @@ Options:
         --from REVISION     Start rewriting from REVISION through the working copy.
                             Mutually exclusive with --revisions.
     -n, --dry-run           Show what would be removed without doing it
+        --ignore-immutable  Allow rewriting immutable commits
     -h, --help              Show this help
 
 Examples:
@@ -125,6 +126,7 @@ find_earliest_revision_for_paths() {
 revset=""
 dry_run=false
 from_revision=""
+ignore_immutable=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -147,6 +149,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--dry-run)
             dry_run=true
+            shift
+            ;;
+        --ignore-immutable)
+            ignore_immutable=true
             shift
             ;;
         -h|--help)
@@ -216,7 +222,10 @@ if [ -z "$revset" ]; then
     if [ -n "$from_revision" ]; then
         revset="${from_revision}::@"
     else
-        mapfile -t working_copy_matches < <(get_matching_files "@")
+        working_copy_matches=()
+        while IFS= read -r line; do
+            [ -n "$line" ] && working_copy_matches+=("$line")
+        done < <(get_matching_files "@")
 
         if [ ${#working_copy_matches[@]} -eq 0 ]; then
             echo "Error: Could not infer revision range because no tracked files in the working copy match the provided patterns. Specify --revisions or --from to override." >&2
@@ -288,11 +297,21 @@ for revision in "${revisions[@]}"; do
         echo "Revision: $revision"
 
         # Edit the revision directly
-        if ! jj edit "$revision" >/dev/null 2>&1; then
-            echo "Error: Failed to edit revision $revision" >&2
+        edit_args=("$revision")
+        if [ "$ignore_immutable" = true ]; then
+            edit_args=("--ignore-immutable" "$revision")
+        fi
+        edit_output=$(jj edit "${edit_args[@]}" 2>&1) || {
+            if echo "$edit_output" | grep -q "immutable"; then
+                echo "Error: Revision $revision is immutable and cannot be edited." >&2
+                echo "Hint: Use --ignore-immutable to rewrite immutable commits." >&2
+            else
+                echo "Error: Failed to edit revision $revision" >&2
+                [ -n "$edit_output" ] && echo "$edit_output" >&2
+            fi
             error_occurred=true
             exit 1
-        fi
+        }
 
         # Remove matching files
         while IFS= read -r file; do
