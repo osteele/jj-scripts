@@ -185,6 +185,15 @@ Emphasize performance implications of algorithmic changes.
 
 The `.ai-commit-instructions` file can be version-controlled and shared with your team to ensure consistent commit message style across all contributors.
 
+#### Handling Large Diffs
+
+When a diff is too large for the selected model, the AI tools truncate the prompt and retry. You can tune the limits with environment variables:
+
+- `AI_COMMIT_MAX_DIFF_BYTES` (default: `200000`) sets the initial diff cap used in prompts
+- `AI_COMMIT_FALLBACK_DIFF_BYTES` (default: `40000`) sets the smaller retry cap when a model rejects the prompt as too long
+
+Set these in your environment to allow larger diffs or to target smaller-context models.
+
 ### `jj-ai-describe`
 Generates conventional commit messages for Jujutsu revisions using AI. Analyzes the changes in each revision and creates descriptive commit messages following conventional commit format. Accepts multiple revset arguments, and each revset is expanded to individual revisions with unique messages generated for each.
 

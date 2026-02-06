@@ -101,6 +101,101 @@ sys.stdout.write(data.decode('utf-8', errors='replace'))
     fi
 }
 
+# Normalize max-bytes setting, falling back to a default if invalid
+normalize_max_bytes() {
+    local value="$1"
+    local default_value="$2"
+
+    if [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -gt 0 ]; then
+        echo "$value"
+    else
+        echo "$default_value"
+    fi
+}
+
+# Detect whether an LLM error indicates the prompt is too long
+is_prompt_too_long() {
+    local message="$1"
+    echo "$message" | tr '[:upper:]' '[:lower:]' | grep -qE 'input is too long|too long for requested model|prompt.*too long|maximum context|context.*(length|window)'
+}
+
+# Truncate diff content for prompt size, keeping head and tail
+# Sets AI_COMMIT_TRUNCATED and AI_COMMIT_TRUNCATION_NOTE
+truncate_diff_for_prompt() {
+    local diff="$1"
+    local max_bytes="$2"
+
+    AI_COMMIT_TRUNCATED=false
+    AI_COMMIT_TRUNCATION_NOTE=""
+
+    if (( max_bytes <= 0 )); then
+        echo "$diff"
+        return 0
+    fi
+
+    local diff_size=${#diff}
+    if (( diff_size <= max_bytes )); then
+        echo "$diff"
+        return 0
+    fi
+
+    local head_bytes=$(( max_bytes * 2 / 3 ))
+    local tail_bytes=$(( max_bytes - head_bytes ))
+    local head
+    local tail
+    head=$(printf '%s' "$diff" | head -c "$head_bytes")
+    tail=$(printf '%s' "$diff" | tail -c "$tail_bytes")
+    local omitted=$(( diff_size - head_bytes - tail_bytes ))
+
+    AI_COMMIT_TRUNCATED=true
+    AI_COMMIT_TRUNCATION_NOTE="Diff truncated from ${diff_size} bytes to ${max_bytes} bytes (${omitted} bytes omitted)."
+
+    printf '%s\n\n[... %d bytes truncated ...]\n\n%s' "$head" "$omitted" "$tail"
+}
+
+# Build the LLM prompt for commit message generation
+build_commit_prompt() {
+    local diff_content="$1"
+    local custom_prompt="$2"
+    local current_desc="$3"
+    local truncation_note="$4"
+    local note_block=""
+
+    if [[ -n "$truncation_note" ]]; then
+        note_block="NOTE: $truncation_note"
+    fi
+
+    if [[ -n "$custom_prompt" ]]; then
+        printf '%s\n\n' "Analyze these changes and create a commit message according to the following instructions:"
+        if [[ -n "$note_block" ]]; then
+            printf '%s\n\n' "$note_block"
+        fi
+        printf 'Changes:\n```\n%s\n```\n' "$diff_content"
+        if [[ -n "$current_desc" ]]; then
+            printf '\nCurrent description:\n```\n%s\n```\n' "$current_desc"
+        fi
+        printf '\nInstructions:\n```\n%s\n```\n\n' "$custom_prompt"
+        printf '%s\n' "Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed."
+        printf '%s\n\n' "Do not include a summary paragraph after any list of changes."
+        printf '%s\n\n' "$_FORMAT_RULES"
+        printf '%s' "Don't include any other text in the response, just the commit message."
+    else
+        printf '%s\n\n' "Analyze these changes and create a conventional commit message:"
+        if [[ -n "$note_block" ]]; then
+            printf '%s\n\n' "$note_block"
+        fi
+        printf '```\n%s\n```\n' "$diff_content"
+        if [[ -n "$current_desc" ]]; then
+            printf '\nCurrent description (if any):\n```\n%s\n```\n' "$current_desc"
+        fi
+        printf '\n%s\n' "Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed."
+        printf '%s\n' "Do not include a summary paragraph after any list of changes."
+        printf '%s\n\n' "Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:)."
+        printf '%s\n\n' "$_FORMAT_RULES"
+        printf '%s' "Don't include any other text in the response, just the commit message."
+    fi
+}
+
 # Shared formatting rules for commit message prompts
 _FORMAT_RULES='FORMATTING RULES:
 - Commit messages are viewed as plain text, not rendered markdown
@@ -147,70 +242,56 @@ generate_commit_message() {
         return 1
     fi
 
-    # Build the prompt based on whether custom prompt is provided
     local prompt_text
-    if [[ -n "$custom_prompt" ]]; then
-        prompt_text="Analyze these changes and create a commit message according to the following instructions:
-
-Changes:
-\`\`\`
-$diff_content
-\`\`\`"
-
-        if [[ -n "$current_desc" ]]; then
-            prompt_text="$prompt_text
-
-Current description:
-\`\`\`
-$current_desc
-\`\`\`"
-        fi
-
-        prompt_text="$prompt_text
-
-Instructions:
-\`\`\`
-$custom_prompt
-\`\`\`
-
-Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
-Do not include a summary paragraph after any list of changes.
-
-$_FORMAT_RULES
-
-Don't include any other text in the response, just the commit message."
-    else
-        prompt_text="Analyze these changes and create a conventional commit message:
-
-\`\`\`
-$diff_content
-\`\`\`"
-
-        if [[ -n "$current_desc" ]]; then
-            prompt_text="$prompt_text
-
-Current description (if any):
-\`\`\`
-$current_desc
-\`\`\`"
-        fi
-
-        prompt_text="$prompt_text
-
-Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
-Do not include a summary paragraph after any list of changes.
-Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:).
-
-$_FORMAT_RULES
-
-Don't include any other text in the response, just the commit message."
+    local max_bytes
+    local fallback_bytes
+    max_bytes=$(normalize_max_bytes "${AI_COMMIT_MAX_DIFF_BYTES:-}" 200000)
+    fallback_bytes=$(normalize_max_bytes "${AI_COMMIT_FALLBACK_DIFF_BYTES:-}" 40000)
+    if (( fallback_bytes >= max_bytes )); then
+        fallback_bytes=$(( max_bytes / 2 ))
     fi
+
+    local truncated_diff
+    local truncation_note=""
+    local used_fallback=false
+
+    truncated_diff=$(truncate_diff_for_prompt "$diff_content" "$max_bytes")
+    if [[ "$AI_COMMIT_TRUNCATED" == "true" ]]; then
+        truncation_note="$AI_COMMIT_TRUNCATION_NOTE"
+    fi
+    prompt_text=$(build_commit_prompt "$truncated_diff" "$custom_prompt" "$current_desc" "$truncation_note")
 
     # Generate commit message using llm
     # Pass prompt as argument, which may still be large but less likely to hit ARG_MAX
     # than including the diff in the argument
     local commit_msg
-    commit_msg=$(echo "$prompt_text" | llm --model "$model")
+    local llm_exit_code
+    commit_msg=$(echo "$prompt_text" | llm --model "$model" 2>&1)
+    llm_exit_code=$?
+    if [[ $llm_exit_code -ne 0 ]]; then
+        if is_prompt_too_long "$commit_msg" && (( fallback_bytes < max_bytes )); then
+            truncated_diff=$(truncate_diff_for_prompt "$diff_content" "$fallback_bytes")
+            truncation_note=""
+            if [[ "$AI_COMMIT_TRUNCATED" == "true" ]]; then
+                truncation_note="$AI_COMMIT_TRUNCATION_NOTE"
+            fi
+            prompt_text=$(build_commit_prompt "$truncated_diff" "$custom_prompt" "$current_desc" "$truncation_note")
+            commit_msg=$(echo "$prompt_text" | llm --model "$model" 2>&1)
+            llm_exit_code=$?
+            used_fallback=true
+        fi
+        if [[ $llm_exit_code -ne 0 ]]; then
+            echo "$commit_msg" >&2
+            return 1
+        fi
+    fi
+    if [[ "$AI_COMMIT_TRUNCATED" == "true" ]]; then
+        if [[ "$used_fallback" == "true" ]]; then
+            echo "Warning: $AI_COMMIT_TRUNCATION_NOTE (after retry). Set AI_COMMIT_FALLBACK_DIFF_BYTES to adjust." >&2
+        else
+            echo "Warning: $AI_COMMIT_TRUNCATION_NOTE Set AI_COMMIT_MAX_DIFF_BYTES to adjust." >&2
+        fi
+    fi
 
     # Strip markdown code fences if present
     if [[ "$commit_msg" =~ ^\`\`\`.* ]] && [[ "$commit_msg" =~ \`\`\`$ ]]; then
@@ -275,7 +356,13 @@ Don't include any other text in the response, just the revised commit message."
 
     # Generate revised message using llm
     local revised_msg
+    local llm_exit_code
     revised_msg=$(echo "$prompt_text" | llm --model "$model")
+    llm_exit_code=$?
+    if [[ $llm_exit_code -ne 0 ]]; then
+        echo "$revised_msg" >&2
+        return 1
+    fi
 
     # Strip markdown code fences if present
     if [[ "$revised_msg" =~ ^\`\`\`.* ]] && [[ "$revised_msg" =~ \`\`\`$ ]]; then

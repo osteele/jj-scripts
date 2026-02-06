@@ -277,7 +277,11 @@ if [ "$DEBUG" = true ]; then
     echo "$combined_prompt" >&2
 fi
 
-commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "")
+commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "") || {
+    printf "\r\033[K" >&2
+    echo "Error: Failed to generate commit message" >&2
+    exit 1
+}
 
 printf "\r\033[K" >&2  # Clear progress message
 
