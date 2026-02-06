@@ -99,7 +99,7 @@ declare -a revset_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--model)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --model requires an argument" >&2
                 exit 1
             fi
@@ -116,7 +116,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -p|--prompt)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --prompt requires an argument" >&2
                 exit 1
             fi
@@ -132,7 +132,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -f|--from)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --from requires an argument" >&2
                 exit 1
             fi
@@ -140,7 +140,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -t|--to)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --to requires an argument" >&2
                 exit 1
             fi
@@ -148,7 +148,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -r|--revision|--revisions)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: -r/--revision requires an argument" >&2
                 exit 1
             fi
@@ -169,7 +169,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --author)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --author requires an argument" >&2
                 exit 1
             fi
@@ -186,7 +186,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --color)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --color requires an argument" >&2
                 exit 1
             fi
@@ -203,7 +203,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --config)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --config requires an argument" >&2
                 exit 1
             fi
@@ -211,7 +211,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --config-file)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --config-file requires an argument" >&2
                 exit 1
             fi
@@ -232,6 +232,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Check if we're in a jj repository
+if ! jj "${jj_global_args[@]}" root >/dev/null 2>&1; then
+    echo "Error: Not in a Jujutsu repository" >&2
+    exit 1
+fi
 
 # Default revset selection if no revsets specified
 if [ ${#revset_args[@]} -eq 0 ]; then
@@ -263,12 +269,6 @@ if [ ${#revset_args[@]} -eq 0 ]; then
             fi
         fi
     fi
-fi
-
-# Check if we're in a jj repository
-if ! jj "${jj_global_args[@]}" root >/dev/null 2>&1; then
-    echo "Error: Not in a Jujutsu repository" >&2
-    exit 1
 fi
 
 # Expand revsets to individual revisions
@@ -485,14 +485,11 @@ if [ "$dry_run" = true ]; then
             echo "$combined_prompt" >&2
         fi
 
-        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc")
-
-        # Check if generation succeeded
-        if [ $? -ne 0 ]; then
+        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc") || {
             printf "\r\033[K" >&2
             echo "Error: Failed to generate message for revision $revision" >&2
             exit 1
-        fi
+        }
 
         printf "\r\033[K" >&2  # Clear progress message
 
@@ -580,14 +577,11 @@ else
             echo "$combined_prompt" >&2
         fi
 
-        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc")
-
-        # Check if generation succeeded
-        if [ $? -ne 0 ]; then
+        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc") || {
             printf "\r\033[K" >&2
             echo "Error: Failed to generate message for revision $revision" >&2
             exit 1
-        fi
+        }
 
         printf "\r\033[K" >&2  # Clear progress message
 
@@ -600,17 +594,10 @@ else
         if [ "$QUIET" = false ]; then
             echo -e "\n== Applying new description ==" >&2
         fi
-        if [ ${#jj_describe_args[@]} -gt 0 ]; then
-            jj "${jj_global_args[@]}" describe -r "$revision" -m "$commit_msg" "${jj_describe_args[@]}"
-        else
-            jj "${jj_global_args[@]}" describe -r "$revision" -m "$commit_msg"
-        fi
-
-        # Check if application succeeded
-        if [ $? -ne 0 ]; then
+        jj "${jj_global_args[@]}" describe -r "$revision" -m "$commit_msg" "${jj_describe_args[@]}" || {
             echo "Error: Failed to apply description for revision $revision" >&2
             exit 1
-        fi
+        }
 
         if [ "$QUIET" = false ]; then
             echo "✓ Description applied successfully"

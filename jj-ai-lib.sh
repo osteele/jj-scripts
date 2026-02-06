@@ -31,8 +31,10 @@ select_default_model() {
         fi
     done
 
-    # If no preferred model is found, use the first available model
-    echo "$models" | head -n 1
+    # If no preferred model is found, ask the user to configure one
+    echo "Error: No preferred LLM model found. Set a default with:" >&2
+    echo "  llm aliases set ai-commit-message <model-name>" >&2
+    exit 1
 }
 
 # Resolve model alias to actual model name for display
@@ -99,6 +101,30 @@ sys.stdout.write(data.decode('utf-8', errors='replace'))
     fi
 }
 
+# Shared formatting rules for commit message prompts
+_FORMAT_RULES='FORMATTING RULES:
+- Commit messages are viewed as plain text, not rendered markdown
+- Use backticks for `code`, `filenames`, and `identifiers`
+- Do NOT use **bold** or *italic* markdown
+- Write bullet lists as plain text with simple dashes (-)
+- Keep formatting minimal and readable as plain text
+
+GOOD EXAMPLE:
+feat: Add gradient compression pipeline
+
+- Implement bucket-based quantization codec
+- Add compression ratio calculation in `metrics.py`
+- Support 8-bit and 16-bit quantization modes
+- Update documentation with usage examples
+
+AVOID (too much markdown):
+feat: Add gradient compression pipeline
+
+- **Implement** bucket-based quantization codec
+- Add compression ratio calculation in **metrics.py**
+- Support **8-bit** and **16-bit** quantization modes
+- Update **documentation** with usage examples'
+
 # Generate a commit message from diff using AI
 # Arguments:
 #   $1 - model name
@@ -150,28 +176,7 @@ $custom_prompt
 Format the response as a conventional commit message with a brief title line followed by a more detailed description if needed.
 Do not include a summary paragraph after any list of changes.
 
-FORMATTING RULES:
-- Commit messages are viewed as plain text, not rendered markdown
-- Use backticks for \`code\`, \`filenames\`, and \`identifiers\`
-- Do NOT use **bold** or *italic* markdown
-- Write bullet lists as plain text with simple dashes (-)
-- Keep formatting minimal and readable as plain text
-
-GOOD EXAMPLE:
-feat: Add gradient compression pipeline
-
-- Implement bucket-based quantization codec
-- Add compression ratio calculation in \`metrics.py\`
-- Support 8-bit and 16-bit quantization modes
-- Update documentation with usage examples
-
-AVOID (too much markdown):
-feat: Add gradient compression pipeline
-
-- **Implement** bucket-based quantization codec
-- Add compression ratio calculation in **metrics.py**
-- Support **8-bit** and **16-bit** quantization modes
-- Update **documentation** with usage examples
+$_FORMAT_RULES
 
 Don't include any other text in the response, just the commit message."
     else
@@ -196,28 +201,7 @@ Format the response as a conventional commit message with a brief title line fol
 Do not include a summary paragraph after any list of changes.
 Follow the conventional commit format (e.g., feat:, fix:, docs:, chore:, refactor:, test:, style:).
 
-FORMATTING RULES:
-- Commit messages are viewed as plain text, not rendered markdown
-- Use backticks for \`code\`, \`filenames\`, and \`identifiers\`
-- Do NOT use **bold** or *italic* markdown
-- Write bullet lists as plain text with simple dashes (-)
-- Keep formatting minimal and readable as plain text
-
-GOOD EXAMPLE:
-feat: Add gradient compression pipeline
-
-- Implement bucket-based quantization codec
-- Add compression ratio calculation in \`metrics.py\`
-- Support 8-bit and 16-bit quantization modes
-- Update documentation with usage examples
-
-AVOID (too much markdown):
-feat: Add gradient compression pipeline
-
-- **Implement** bucket-based quantization codec
-- Add compression ratio calculation in **metrics.py**
-- Support **8-bit** and **16-bit** quantization modes
-- Update **documentation** with usage examples
+$_FORMAT_RULES
 
 Don't include any other text in the response, just the commit message."
     fi
@@ -285,12 +269,7 @@ IMPORTANT:
 - Apply the revision instructions while preserving the essential meaning
 - Output only the revised commit message, nothing else
 
-FORMATTING RULES:
-- Commit messages are viewed as plain text, not rendered markdown
-- Use backticks for \`code\`, \`filenames\`, and \`identifiers\`
-- Do NOT use **bold** or *italic* markdown
-- Write bullet lists as plain text with simple dashes (-)
-- Keep formatting minimal and readable as plain text
+$_FORMAT_RULES
 
 Don't include any other text in the response, just the revised commit message."
 

@@ -80,24 +80,11 @@ if [[ ${#changed_paths[@]} -gt 0 ]]; then
     )
 fi
 
-unique_paths=()
-
 if [[ ${#ignored_paths[@]} -gt 1 ]]; then
     unique_paths=()
-    for path in "${ignored_paths[@]}"; do
-        already_present=false
-        if [[ ${#unique_paths[@]} -gt 0 ]]; then
-            for existing in "${unique_paths[@]}"; do
-                if [[ "$path" == "$existing" ]]; then
-                    already_present=true
-                    break
-                fi
-            done
-        fi
-        if [[ "$already_present" == false ]]; then
-            unique_paths+=("$path")
-        fi
-    done
+    while IFS= read -r path; do
+        [ -n "$path" ] && unique_paths+=("$path")
+    done < <(printf '%s\n' "${ignored_paths[@]}" | awk '!seen[$0]++')
     ignored_paths=("${unique_paths[@]}")
 fi
 

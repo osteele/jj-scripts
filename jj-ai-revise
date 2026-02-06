@@ -81,7 +81,7 @@ declare -a revset_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--model)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --model requires an argument" >&2
                 exit 1
             fi
@@ -98,7 +98,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -p|--prompt)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --prompt requires an argument" >&2
                 exit 1
             fi
@@ -118,7 +118,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --author)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --author requires an argument" >&2
                 exit 1
             fi
@@ -135,7 +135,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --color)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --color requires an argument" >&2
                 exit 1
             fi
@@ -152,7 +152,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --config)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --config requires an argument" >&2
                 exit 1
             fi
@@ -160,7 +160,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --config-file)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --config-file requires an argument" >&2
                 exit 1
             fi
@@ -273,14 +273,11 @@ if [ "$dry_run" = true ]; then
         fi
 
         # Generate revised description
-        revised_msg=$(generate_revision_message "$model" "$revision_prompt" "$additional_instructions" "$current_desc")
-
-        # Check if generation succeeded
-        if [ $? -ne 0 ]; then
+        revised_msg=$(generate_revision_message "$model" "$revision_prompt" "$additional_instructions" "$current_desc") || {
             printf "\r\033[K" >&2
             echo "Error: Failed to revise message for revision $revision" >&2
             exit 1
-        fi
+        }
 
         printf "\r\033[K" >&2  # Clear progress message
 
@@ -341,14 +338,11 @@ else
         echo -n "Revising commit message... " >&2
 
         # Generate revised description
-        revised_msg=$(generate_revision_message "$model" "$revision_prompt" "$additional_instructions" "$current_desc")
-
-        # Check if generation succeeded
-        if [ $? -ne 0 ]; then
+        revised_msg=$(generate_revision_message "$model" "$revision_prompt" "$additional_instructions" "$current_desc") || {
             printf "\r\033[K" >&2
             echo "Error: Failed to revise message for revision $revision" >&2
             exit 1
-        fi
+        }
 
         printf "\r\033[K" >&2  # Clear progress message
 
@@ -361,17 +355,10 @@ else
         if [ "$QUIET" = false ]; then
             echo -e "\n== Applying revised description ==" >&2
         fi
-        if [ ${#jj_describe_args[@]} -gt 0 ]; then
-            jj "${jj_global_args[@]}" describe -r "$revision" -m "$revised_msg" "${jj_describe_args[@]}"
-        else
-            jj "${jj_global_args[@]}" describe -r "$revision" -m "$revised_msg"
-        fi
-
-        # Check if application succeeded
-        if [ $? -ne 0 ]; then
+        jj "${jj_global_args[@]}" describe -r "$revision" -m "$revised_msg" "${jj_describe_args[@]}" || {
             echo "Error: Failed to apply description for revision $revision" >&2
             exit 1
-        fi
+        }
 
         if [ "$QUIET" = false ]; then
             echo "✓ Description revised successfully"

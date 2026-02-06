@@ -7,6 +7,7 @@ script_name=$(basename "$0")
 revset=""
 from_revision=""
 dry_run=false
+ignore_immutable=false
 source_path=""
 dest_path=""
 
@@ -35,6 +36,7 @@ Options:
         --from REVISION     Start rewriting from REVISION through the working copy.
                             Mutually exclusive with --revisions.
     -n, --dry-run           Show what would be moved without doing it
+        --ignore-immutable  Allow rewriting immutable commits
     -h, --help              Show this help
 
 Examples:
@@ -157,7 +159,7 @@ positional=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -r|--revisions)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --revisions requires an argument" >&2
                 exit 1
             fi
@@ -165,7 +167,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --from)
-            if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+            if [[ $# -lt 2 ]]; then
                 echo "Error: --from requires an argument" >&2
                 exit 1
             fi
@@ -174,6 +176,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--dry-run)
             dry_run=true
+            shift
+            ;;
+        --ignore-immutable)
+            ignore_immutable=true
             shift
             ;;
         -h|--help)
@@ -239,7 +245,10 @@ if [ -z "$revset" ]; then
     if [ -n "$from_revision" ]; then
         revset="${from_revision}::@"
     else
-        mapfile -t working_copy_matches < <(get_matching_files "@" || true)
+        working_copy_matches=()
+        while IFS= read -r line; do
+            [ -n "$line" ] && working_copy_matches+=("$line")
+        done < <(get_matching_files "@" || true)
 
         if [ ${#working_copy_matches[@]} -eq 0 ]; then
             echo "Error: Could not infer revision range because no tracked files in the working copy match the source path. Specify --revisions or --from to override." >&2
@@ -280,7 +289,10 @@ total_files_moved=0
 revisions_modified=0
 
 for revision in "${revisions[@]}"; do
-    mapfile -t matching_files < <(get_matching_files "$revision" || true)
+    matching_files=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && matching_files+=("$line")
+    done < <(get_matching_files "$revision" || true)
 
     if [ ${#matching_files[@]} -eq 0 ]; then
         continue
@@ -304,13 +316,26 @@ for revision in "${revisions[@]}"; do
     echo "Revision: $revision"
 
     sorted_output=$(printf '%s\n' "${matching_files[@]}" | sort_paths_descending)
-    mapfile -t sorted_files <<< "$sorted_output"
+    sorted_files=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && sorted_files+=("$line")
+    done <<< "$sorted_output"
 
-    if ! jj edit "$revision" >/dev/null 2>&1; then
-        echo "Error: Failed to edit revision $revision" >&2
+    edit_args=("$revision")
+    if [ "$ignore_immutable" = true ]; then
+        edit_args=("--ignore-immutable" "$revision")
+    fi
+    edit_output=$(jj edit "${edit_args[@]}" 2>&1) || {
+        if echo "$edit_output" | grep -q "immutable"; then
+            echo "Error: Revision $revision is immutable and cannot be edited." >&2
+            echo "Hint: Use --ignore-immutable to rewrite immutable commits." >&2
+        else
+            echo "Error: Failed to edit revision $revision" >&2
+            [ -n "$edit_output" ] && echo "$edit_output" >&2
+        fi
         error_occurred=true
         exit 1
-    fi
+    }
 
     for file in "${sorted_files[@]}"; do
         target=$(compute_target_path "$file")
@@ -338,7 +363,9 @@ for revision in "${revisions[@]}"; do
         echo "  Moved: $file -> $target"
     done
 
-    if ! jj describe -m "" >/dev/null 2>&1; then
+    # Snapshot changes while preserving the existing description
+    existing_desc=$(jj log --no-pager --no-graph --ignore-working-copy -r @ -T 'description')
+    if ! jj describe -m "$existing_desc" >/dev/null 2>&1; then
         echo "Error: Failed to snapshot changes for revision $revision" >&2
         error_occurred=true
         exit 1
