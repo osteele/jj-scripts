@@ -106,18 +106,28 @@ find_earliest_revision_for_paths() {
     local paths=("$@")
     local log_output
 
-    if ! log_output=$(jj log --ignore-working-copy --no-graph --no-pager -r 'ancestors(@)' -T 'change_id.short() ++ "\n"' -- "${paths[@]}"); then
-        echo "Error: Failed to inspect revision history for the provided paths" >&2
-        exit 1
+    # Empty output is not an error: the caller falls back to scanning history.
+    if ! log_output=$(jj log --ignore-working-copy --no-graph --no-pager -r 'ancestors(@)' -T 'change_id.short() ++ "\n"' -- "${paths[@]}" 2>/dev/null); then
+        return 0
     fi
 
-    local earliest
-    earliest=$(printf '%s\n' "$log_output" | awk 'NF { rev=$0 } END { if (rev != "") print rev }')
+    printf '%s\n' "$log_output" | awk 'NF { rev=$0 } END { if (rev != "") print rev }'
+}
 
-    if [ -z "$earliest" ]; then
-        echo "Error: Could not find any ancestors containing the specified files" >&2
-        exit 1
-    fi
+# Walk ancestors oldest-last, returning the earliest revision holding a match.
+# Handles glob patterns, which jj's own path filter cannot take.
+find_earliest_revision_by_scan() {
+    local revisions=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && revisions+=("$line")
+    done < <(jj log --ignore-working-copy --no-graph --no-pager -r 'ancestors(@)' -T 'change_id.short() ++ "\n"')
+
+    local earliest=""
+    for revision in "${revisions[@]}"; do
+        if [ -n "$(get_matching_files "$revision")" ]; then
+            earliest="$revision"
+        fi
+    done
 
     printf '%s\n' "$earliest"
 }
@@ -227,12 +237,25 @@ if [ -z "$revset" ]; then
             [ -n "$line" ] && working_copy_matches+=("$line")
         done < <(get_matching_files "@")
 
-        if [ ${#working_copy_matches[@]} -eq 0 ]; then
-            echo "Error: Could not infer revision range because no tracked files in the working copy match the provided patterns. Specify --revisions or --from to override." >&2
+        earliest_revision=""
+        if [ ${#working_copy_matches[@]} -gt 0 ]; then
+            earliest_revision=$(find_earliest_revision_for_paths "${working_copy_matches[@]}")
+        elif [ ${#literal_patterns[@]} -gt 0 ]; then
+            # The usual reason to purge something from history is that it was
+            # already deleted, so it is absent from the working copy. jj's path
+            # filter still finds the revisions that held it.
+            earliest_revision=$(find_earliest_revision_for_paths "${literal_patterns[@]}")
+        fi
+
+        if [ -z "$earliest_revision" ]; then
+            earliest_revision=$(find_earliest_revision_by_scan)
+        fi
+
+        if [ -z "$earliest_revision" ]; then
+            echo "Error: No ancestor of the working copy contains files matching the provided patterns. Specify --revisions or --from to override." >&2
             exit 1
         fi
 
-        earliest_revision=$(find_earliest_revision_for_paths "${working_copy_matches[@]}")
         revset="${earliest_revision}::@"
         echo "Auto-selected revision range: $revset"
     fi
