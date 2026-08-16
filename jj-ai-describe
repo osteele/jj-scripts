@@ -39,6 +39,8 @@ Options:
                             Examples: gpt-4, claude-3-opus, mistral-7b, ...
     -n, --dry-run           Show the messages without applying them
     -p, --prompt PROMPT     Provide additional instructions for the message
+    --narrate-diff WHEN     Control diff narration: auto, always, or never
+                            (default: never)
     --replace               Process all revisions, replacing existing descriptions
     --all                   Select all revisions with empty descriptions and changes
                             (uses revset: description(exact:"") & ~empty())
@@ -84,6 +86,8 @@ EOF
 model=$(select_default_model)
 dry_run=false
 custom_prompt=""
+AI_COMMIT_NARRATE_DIFF="${AI_COMMIT_NARRATE_DIFF:-never}"
+export AI_COMMIT_NARRATE_DIFF
 replace_mode=false
 use_all_mode=false
 DEBUG=false
@@ -121,6 +125,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             custom_prompt="$2"
+            shift 2
+            ;;
+        --narrate-diff)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --narrate-diff requires an argument" >&2
+                exit 1
+            fi
+            validate_narration_policy "$2"
+            AI_COMMIT_NARRATE_DIFF="$2"
+            export AI_COMMIT_NARRATE_DIFF
             shift 2
             ;;
         --replace)
@@ -485,7 +499,7 @@ if [ "$dry_run" = true ]; then
             echo "$combined_prompt" >&2
         fi
 
-        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc") || {
+        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc" "$AI_COMMIT_NARRATE_DIFF") || {
             printf "\r\033[K" >&2
             echo "Error: Failed to generate message for revision $revision" >&2
             exit 1
@@ -577,7 +591,7 @@ else
             echo "$combined_prompt" >&2
         fi
 
-        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc") || {
+        commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "$current_desc" "$AI_COMMIT_NARRATE_DIFF") || {
             printf "\r\033[K" >&2
             echo "Error: Failed to generate message for revision $revision" >&2
             exit 1

@@ -141,7 +141,11 @@ Both scripts skip revisions that do not contain matching files, and descendant r
 
 ## AI-Assisted Jujutsu Tools
 
-These AI-powered tools use the `llm` command-line tool to generate conventional commit messages. You can configure a custom model for all commit message generation by setting an alias:
+These AI-powered tools use the shared `ai-commit` prompt engine and the `llm`
+command-line tool. Install `ai-commit` alongside this repository or add its
+`ai-commit-message` executable to `PATH`.
+
+You can configure a custom model for all commit message generation by setting an alias:
 
 ```bash
 # Set a preferred model for commit messages
@@ -223,7 +227,17 @@ jj-ai-describe --model gpt-4 @- @
 
 # Provide additional instructions for the messages
 jj-ai-describe --prompt "Focus on the performance improvements" "main..@"
+
+# Preserve the historical unconstrained narration behavior
+jj-ai-describe --narrate-diff auto @
+
+# Explicitly include concrete files and identifiers in the body
+jj-ai-describe --narrate-diff always @
 ```
+
+By default, commit-message bodies omit files, identifiers, and mechanical edits
+that are readily apparent from the diff. `--narrate-diff auto` adds no
+instruction either way, while `--narrate-diff always` requests those details.
 
 **Note**:
 - When processing multiple revisions, the script stops on the first error
@@ -255,6 +269,9 @@ jj-ai-commit --model openrouter/google/gemini-2.5-flash-lite
 
 # Provide additional instructions for the message
 jj-ai-commit --prompt "Emphasize breaking changes"
+
+# Allow the model to narrate the diff as it did before this option existed
+jj-ai-commit --narrate-diff auto
 
 # Open editor after generating message
 jj-ai-commit --edit

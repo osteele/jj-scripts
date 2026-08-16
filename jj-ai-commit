@@ -32,6 +32,8 @@ Options:
                         Examples: gpt-4, claude-3-opus, gemini-2.5-flash-lite
     -n, --dry-run       Show the message without creating the commit
     -p, --prompt PROMPT Provide additional instructions for the message
+    --narrate-diff WHEN Control diff narration: auto, always, or never
+                          (default: never)
     -l, --list          List available models
     -i, --interactive   Interactively choose which changes to include
     --tool NAME         Specify diff editor to use (implies --interactive)
@@ -71,6 +73,8 @@ EOF
 model=$(select_default_model)
 dry_run=false
 custom_prompt=""
+AI_COMMIT_NARRATE_DIFF="${AI_COMMIT_NARRATE_DIFF:-never}"
+export AI_COMMIT_NARRATE_DIFF
 DEBUG=false
 QUIET=false
 
@@ -105,6 +109,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             custom_prompt="$2"
+            shift 2
+            ;;
+        --narrate-diff)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --narrate-diff requires an argument" >&2
+                exit 1
+            fi
+            validate_narration_policy "$2"
+            AI_COMMIT_NARRATE_DIFF="$2"
+            export AI_COMMIT_NARRATE_DIFF
             shift 2
             ;;
         -i|--interactive)
@@ -277,7 +291,7 @@ if [ "$DEBUG" = true ]; then
     echo "$combined_prompt" >&2
 fi
 
-commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "") || {
+commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_prompt" "" "$AI_COMMIT_NARRATE_DIFF") || {
     printf "\r\033[K" >&2
     echo "Error: Failed to generate commit message" >&2
     exit 1
