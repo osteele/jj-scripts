@@ -141,9 +141,8 @@ Both scripts skip revisions that do not contain matching files, and descendant r
 
 ## AI-Assisted Jujutsu Tools
 
-These AI-powered tools use the shared `ai-commit` prompt engine and the `llm`
-command-line tool. Install `ai-commit` alongside this repository or add its
-`ai-commit-message` executable to `PATH`.
+These AI-powered tools use the `llm` command-line tool to generate and modify
+commit messages.
 
 You can configure a custom model for all commit message generation by setting an alias:
 
