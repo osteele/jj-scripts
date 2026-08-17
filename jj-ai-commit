@@ -31,7 +31,10 @@ Options:
     -m, --model MODEL   Specify the LLM model to use (default: auto-select)
                         Examples: gpt-4, claude-3-opus, gemini-2.5-flash-lite
     -n, --dry-run       Show the message without creating the commit
+    --print-message     Print only the generated message to stdout and exit
+                        (implies --no-decoration; nothing is committed)
     -p, --prompt PROMPT Provide additional instructions for the message
+    --no-decoration     Suppress this script's headings; print only results
     --narrate-diff WHEN Control diff narration: auto, always, or never
                           (default: never)
     -l, --list          List available models
@@ -72,11 +75,16 @@ EOF
 # Default values
 model=$(select_default_model)
 dry_run=false
+print_message=false
 custom_prompt=""
 AI_COMMIT_NARRATE_DIFF="${AI_COMMIT_NARRATE_DIFF:-never}"
 export AI_COMMIT_NARRATE_DIFF
 DEBUG=false
 QUIET=false
+# decorate gates this script's own banners. It is deliberately separate
+# from QUIET, which also forwards --quiet to jj and may come to govern
+# other behavior; suppressing our headings should not imply either.
+decorate=true
 
 # Arrays for organizing arguments
 declare -a jj_global_args=()
@@ -96,6 +104,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--dry-run)
             dry_run=true
+            shift
+            ;;
+        --print-message)
+            # Emit the message alone, for callers that want to seed an
+            # editor or prompt with it. Implies --dry-run and silences the
+            # decorative output: nothing is committed.
+            print_message=true
+            dry_run=true
+            decorate=false
             shift
             ;;
         -l|--list)
@@ -165,6 +182,11 @@ while [[ $# -gt 0 ]]; do
         --quiet)
             jj_global_args+=("--quiet")
             QUIET=true
+            decorate=false
+            shift
+            ;;
+        --no-decoration)
+            decorate=false
             shift
             ;;
         --no-pager)
@@ -209,11 +231,11 @@ if ! jj "${jj_global_args[@]}" root >/dev/null 2>&1; then
 fi
 
 # Check if there are any changes and show a summary
-if [ "$QUIET" = false ]; then
+if [ "$decorate" = true ]; then
     echo -e "\n== Changes to commit =="
 fi
 if [ ${#filesets[@]} -gt 0 ]; then
-    if [ "$QUIET" = false ]; then
+    if [ "$decorate" = true ]; then
         echo "Files: ${filesets[*]}"
     fi
     # Check if there are any changes in the specified files
@@ -224,7 +246,7 @@ if [ ${#filesets[@]} -gt 0 ]; then
         exit 0
     fi
 else
-    if [ "$QUIET" = false ]; then
+    if [ "$decorate" = true ]; then
         echo "All changes in working copy"
     fi
     # Check if there are any changes in the working copy revision
@@ -269,7 +291,7 @@ if [ "$DEBUG" = true ]; then
     echo "[DEBUG] Using model: $model_display" >&2
 fi
 
-if [ "$QUIET" = false ]; then
+if [ "$decorate" = true ]; then
     echo -e "\n== Generating Commit Message (via ${model_display}) =="
 fi
 echo -n "Generating commit message... " >&2
@@ -300,12 +322,18 @@ commit_msg=$(echo "$diff_output" | generate_commit_message "$model" "$combined_p
 printf "\r\033[K" >&2  # Clear progress message
 
 # Display the message
+# The message is the result, not decoration: --no-decoration must not
+# suppress it. Only --quiet, which asks for silence outright, does.
 if [ "$QUIET" = false ]; then
     echo "$commit_msg"
 fi
 
+if [ "$print_message" = true ]; then
+    exit 0
+fi
+
 if [ "$dry_run" = true ]; then
-    if [ "$QUIET" = false ]; then
+    if [ "$decorate" = true ]; then
         echo -e "\n== Next Steps =="
         if [ ${#filesets[@]} -gt 0 ]; then
             echo "To commit these files with this message, run:"
@@ -316,7 +344,7 @@ if [ "$dry_run" = true ]; then
         fi
     fi
 else
-    if [ "$QUIET" = false ]; then
+    if [ "$decorate" = true ]; then
         echo -e "\n== Creating commit ==" >&2
     fi
 
@@ -336,7 +364,7 @@ else
 
     # Execute the commit
     if "${commit_cmd[@]}"; then
-        if [ "$QUIET" = false ]; then
+        if [ "$decorate" = true ]; then
             echo "Commit created successfully!"
 
             # Show the new commit
