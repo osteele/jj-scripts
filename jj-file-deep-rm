@@ -352,6 +352,29 @@ for revision in "${revisions[@]}"; do
             exit 1
         fi
 
+        # Verify the removal actually landed. `jj edit --ignore-immutable`
+        # succeeds on a revision that is an ancestor of a remote bookmark, but
+        # the rewrite does not stick there, so counting visited revisions
+        # reports success for files that are still present. Check the tree.
+        still_present=""
+        while IFS= read -r file; do
+            if jj file list --ignore-working-copy -r "$revision" 2>/dev/null \
+                | grep -qxF "$file"; then
+                still_present="${still_present}  ${file}"$'\n'
+            fi
+        done <<< "$matching_files"
+        if [ -n "$still_present" ]; then
+            echo "Error: removal did not take effect in $revision:" >&2
+            printf '%s' "$still_present" >&2
+            echo "Hint: that revision is probably immutable. --ignore-immutable" >&2
+            echo "  lets jj edit proceed but does not make the rewrite stick." >&2
+            echo "  Relax the definition instead, re-run, then restore it:" >&2
+            echo "    jj config set --repo 'revset-aliases.\"immutable_heads()\"' 'none()'" >&2
+            echo "    jj config unset --repo 'revset-aliases.\"immutable_heads()\"'" >&2
+            error_occurred=true
+            exit 1
+        fi
+
         total_files_removed=$((total_files_removed + file_count))
         revisions_modified=$((revisions_modified + 1))
     fi
