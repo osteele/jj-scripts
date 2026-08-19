@@ -30,9 +30,10 @@ Arguments:
 Options:
     -m, --model MODEL   Specify the LLM model to use (default: auto-select)
                         Examples: gpt-4, claude-3-opus, gemini-2.5-flash-lite
-    -n, --dry-run       Show the message without creating the commit
-    --print-message     Print only the generated message to stdout and exit
-                        (implies --no-decoration; nothing is committed)
+    --split             Group changed files into one or several commits by theme
+    -n, --dry-run       Show the message or split plan without creating commits
+    --print-message     Print only the generated message or plan to stdout and
+                        exit (implies --no-decoration; nothing is committed)
     -p, --prompt PROMPT Provide additional instructions for the message
     --no-decoration     Suppress this script's headings; print only results
     --narrate-diff WHEN Control diff narration: auto, always, or never
@@ -62,6 +63,8 @@ Examples:
     $(basename "$0") README.md lib/*.py            # Commit specific files
     $(basename "$0") -m gemini-2.5-flash-lite      # Use specific model
     $(basename "$0") -i                            # Interactive selection
+    $(basename "$0") --split                       # Group changes into themed commits
+    $(basename "$0") --split -n                    # Preview themed commit plan
 
 To set a default model, use:
     llm aliases set ai-commit-message <model-name>
@@ -72,10 +75,201 @@ EOF
     exit 1
 }
 
+# Parse `jj diff --summary` output on stdin.
+# Emits one path per line. Deletions are included because they still need
+# committing. Renames and copies are rejected: their summary line names two
+# paths that must reach exactly one commit, and we cannot guarantee the
+# grouping engine keeps them together.
+parse_diff_summary() {
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        local status="${line:0:1}"
+        local rest="${line:2}"
+        case "$status" in
+            A|M|D)
+                printf '%s\n' "$rest"
+                ;;
+            R|C)
+                echo "Error: --split does not support renames or copies: $line" >&2
+                return 1
+                ;;
+            *)
+                # Defensive: any remaining arrow syntax looks like a rename/copy.
+                if [[ "$rest" == *\ =\>* ]]; then
+                    echo "Error: --split does not support renames or copies: $line" >&2
+                    return 1
+                fi
+                printf '%s\n' "$rest"
+                ;;
+        esac
+    done
+}
+
+# Print a split plan in human-readable form.
+print_split_plan() {
+    local plan_json="$1"
+    local num_commits
+    num_commits=$(printf '%s' "$plan_json" | jq '.commits | length')
+    if [ "$decorate" = true ]; then
+        echo -e "\n== Split plan =="
+    fi
+    local i
+    for (( i=0; i<num_commits; i++ )); do
+        local msg
+        msg=$(printf '%s' "$plan_json" | jq -r --argjson idx "$i" '.commits[$idx].message')
+        if [ "$decorate" = true ]; then
+            echo ""
+            echo "Commit $((i+1)):"
+        fi
+        echo "$msg"
+        if [ "$decorate" = true ]; then
+            echo "Files:"
+        fi
+        printf '%s' "$plan_json" | jq -r --argjson idx "$i" '.commits[$idx].files[]' | sed 's/^/  /'
+    done
+}
+
+# Apply a split plan by committing each group in order.
+# If a commit fails, report which commits were created and which were not.
+apply_split_plan() {
+    local plan_json="$1"
+    local num_commits
+    num_commits=$(printf '%s' "$plan_json" | jq '.commits | length')
+    local created_messages=()
+    local i
+    for (( i=0; i<num_commits; i++ )); do
+        local msg
+        msg=$(printf '%s' "$plan_json" | jq -r --argjson idx "$i" '.commits[$idx].message')
+        local -a commit_files=()
+        while IFS= read -r f; do
+            commit_files+=("$f")
+        done < <(printf '%s' "$plan_json" | jq -r --argjson idx "$i" '.commits[$idx].files[]')
+
+        if [ "$decorate" = true ]; then
+            echo -e "\n== Creating commit $((i+1)) of ${num_commits} ==" >&2
+        fi
+
+        local commit_cmd=(jj "${jj_global_args[@]}" commit -m "$msg" "${commit_files[@]}")
+        if ! "${commit_cmd[@]}"; then
+            echo "Error: Failed to create commit $((i+1)) of ${num_commits}" >&2
+            if [ ${#created_messages[@]} -gt 0 ]; then
+                echo "Created commits:" >&2
+                local j
+                for (( j=0; j<${#created_messages[@]}; j++ )); do
+                    echo "  $((j+1)). ${created_messages[$j]}" >&2
+                done
+            else
+                echo "No commits were created" >&2
+            fi
+            echo "Not created:" >&2
+            local j
+            for (( j=i; j<num_commits; j++ )); do
+                local not_msg
+                not_msg=$(printf '%s' "$plan_json" | jq -r --argjson idx "$j" '.commits[$idx].message')
+                echo "  $((j+1)). $not_msg" >&2
+            done
+            return 1
+        fi
+        created_messages+=("$msg")
+    done
+
+    if [ "$decorate" = true ]; then
+        echo -e "\n== Created ${num_commits} commits ==" >&2
+        jj "${jj_global_args[@]}" log --no-pager -r "ancestors(@-, ${num_commits})"
+    fi
+}
+
+# Generate a split plan and either display it or apply it.
+run_split_commit() {
+    local summary_output
+    if [ ${#filesets[@]} -gt 0 ]; then
+        summary_output=$(jj "${jj_global_args[@]}" diff --no-pager --summary "${filesets[@]}")
+    else
+        summary_output=$(jj "${jj_global_args[@]}" diff --no-pager --summary -r @)
+    fi
+
+    if [ -z "$summary_output" ]; then
+        echo "Error: No changes to split" >&2
+        return 1
+    fi
+
+    local files_list_text
+    files_list_text=$(printf '%s\n' "$summary_output" | parse_diff_summary) || return 1
+
+    if [ -z "$files_list_text" ]; then
+        echo "Error: No files to split after parsing diff summary" >&2
+        return 1
+    fi
+
+    local files_from
+    files_from=$(mktemp)
+    printf '%s\n' "$files_list_text" > "$files_from"
+
+    local model_display
+    model_display=$(resolve_model_display "$model")
+
+    if [ "$decorate" = true ]; then
+        echo -e "\n== Generating Split Plan (via ${model_display}) =="
+    fi
+    echo -n "Generating split plan... " >&2
+
+    local diff_output
+    if [ ${#filesets[@]} -gt 0 ]; then
+        diff_output=$(jj "${jj_global_args[@]}" diff --no-pager --git "${filesets[@]}")
+    else
+        diff_output=$(jj "${jj_global_args[@]}" diff --no-pager --git -r @)
+    fi
+
+    local plan_json
+    if ! plan_json=$(printf '%s' "$diff_output" | generate_split_plan "$model" "$combined_prompt" "$files_from" "$AI_COMMIT_NARRATE_DIFF"); then
+        printf "\r\033[K" >&2
+        rm -f "$files_from"
+        echo "Error: Failed to generate split plan" >&2
+        return 1
+    fi
+    printf "\r\033[K" >&2
+    rm -f "$files_from"
+
+    if [ "$print_message" = true ]; then
+        echo "$plan_json"
+        return 0
+    fi
+
+    if [ "$QUIET" = false ]; then
+        print_split_plan "$plan_json"
+    fi
+
+    if [ "$dry_run" = true ]; then
+        return 0
+    fi
+
+    # Re-derive the file list immediately before the first commit. An editor
+    # autosave or another process may have changed the working copy since the
+    # plan was generated; committing against a stale plan would apply files in
+    # an unreviewed state.
+    local current_files_list_text
+    if [ ${#filesets[@]} -gt 0 ]; then
+        current_files_list_text=$(jj "${jj_global_args[@]}" diff --no-pager --summary "${filesets[@]}" | parse_diff_summary)
+    else
+        current_files_list_text=$(jj "${jj_global_args[@]}" diff --no-pager --summary -r @ | parse_diff_summary)
+    fi
+    local sorted_files sorted_current
+    sorted_files=$(printf '%s\n' "$files_list_text" | sort)
+    sorted_current=$(printf '%s\n' "$current_files_list_text" | sort)
+    if [ "$sorted_files" != "$sorted_current" ]; then
+        echo "Error: Working copy changed since the split plan was generated; aborting to avoid committing unreviewed changes" >&2
+        return 1
+    fi
+
+    apply_split_plan "$plan_json"
+}
+
 # Default values
 model=$(select_default_model)
 dry_run=false
 print_message=false
+split=false
 custom_prompt=""
 AI_COMMIT_NARRATE_DIFF="${AI_COMMIT_NARRATE_DIFF:-never}"
 export AI_COMMIT_NARRATE_DIFF
@@ -113,6 +307,10 @@ while [[ $# -gt 0 ]]; do
             print_message=true
             dry_run=true
             decorate=false
+            shift
+            ;;
+        --split)
+            split=true
             shift
             ;;
         -l|--list)
@@ -224,6 +422,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# --split groups files by theme; interactive selection contradicts that.
+if [ "$split" = true ]; then
+    for arg in "${jj_commit_args[@]}"; do
+        if [ "$arg" = "--interactive" ] || [ "$arg" = "--tool" ]; then
+            echo "Error: --split cannot be used with --interactive or --tool" >&2
+            exit 1
+        fi
+    done
+fi
+
 # Check if we're in a jj repository
 if ! jj "${jj_global_args[@]}" root >/dev/null 2>&1; then
     echo "Error: Not in a Jujutsu repository" >&2
@@ -242,6 +450,10 @@ if [ ${#filesets[@]} -gt 0 ]; then
     # Note: Use variable instead of pipe to avoid pipefail interaction with jj exit code
     diff_check=$(jj "${jj_global_args[@]}" diff --no-pager --summary "${filesets[@]}" 2>/dev/null || true)
     if [ -z "$diff_check" ]; then
+        if [ "$split" = true ]; then
+            echo "Error: No changes to split in specified files" >&2
+            exit 1
+        fi
         echo "No changes to commit in specified files" >&2
         exit 0
     fi
@@ -254,6 +466,10 @@ else
     # Note: Use variable instead of pipe to avoid pipefail interaction with jj exit code
     diff_check=$(jj "${jj_global_args[@]}" diff --no-pager --stat -r @ 2>/dev/null || true)
     if [ -z "$diff_check" ]; then
+        if [ "$split" = true ]; then
+            echo "Error: No changes to split" >&2
+            exit 1
+        fi
         echo "No changes to commit" >&2
         exit 0
     fi
@@ -282,6 +498,11 @@ if [ -n "$custom_prompt" ]; then
 "
     fi
     combined_prompt="$combined_prompt$custom_prompt"
+fi
+
+if [ "$split" = true ]; then
+    run_split_commit
+    exit $?
 fi
 
 # Generate commit message with progress indicator

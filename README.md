@@ -263,6 +263,12 @@ jj-ai-commit -n
 # Interactive selection of changes
 jj-ai-commit -i
 
+# Group changes into multiple themed commits
+jj-ai-commit --split
+
+# Preview the themed commit plan without committing
+jj-ai-commit --split -n
+
 # Use a specific LLM model
 jj-ai-commit --model openrouter/google/gemini-2.5-flash-lite
 
@@ -278,6 +284,12 @@ jj-ai-commit --edit
 # List available models
 jj-ai-commit -l
 ```
+
+`--split` asks the model to partition changed files into coherent commits. It
+respects the same `--model`, `--prompt`, `--narrate-diff`, `--dry-run`, and
+`--print-message` options as the default mode. It cannot be combined with
+`-i/--interactive` (or `--tool`), because the model is choosing the groups.
+Renames and copies are refused rather than grouped incorrectly.
 
 ### `jj-ai-revise`
 Revises existing commit descriptions according to instructions using AI. This command modifies existing descriptions based on a prompt, without looking at the actual code changes. Useful for applying consistent style changes across multiple commits, such as removing markdown formatting, making descriptions more concise, or removing redundant information.

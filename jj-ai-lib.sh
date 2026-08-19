@@ -61,6 +61,18 @@ generate_commit_message() {
     fi
     "$(find_ai_commit_engine)" "${args[@]}"
 }
+generate_split_plan() {
+    local model="$1"
+    local custom_prompt="$2"
+    local files_from="$3"
+    local narration_policy="${4:-${AI_COMMIT_NARRATE_DIFF:-never}}"
+    local -a args=(split --model "$model" --narrate-diff "$narration_policy" --files-from "$files_from")
+    if [[ -n "$custom_prompt" ]]; then
+        args+=(--prompt "$custom_prompt")
+    fi
+    "$(find_ai_commit_engine)" "${args[@]}"
+}
+
 generate_revision_message() {
     local model="$1"
     local revision_prompt="$2"
